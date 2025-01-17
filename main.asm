@@ -1,34 +1,115 @@
 INCLUDE "hardware.inc"
 
-MACRO LD_VX_HL
-    ld hl, V0
+; TO COMPILE RUN:
+; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -v -p 0xFF chip8boy.gb
+
+MACRO MEMCPY
+	ld hl, \1 ; Destination
+	ld bc, \2 ; Source
+	ld de, \3 ; Source end
+.Loop\@:
+	ld a, [bc]
+	ld [hl+], a
+	inc bc
+
+	ld a, c
+	cp a, e
+	jr nz, .Loop\@
+	ld a, b
+	cp a, d
+	jr nz, .Loop\@
+ENDM
+
+MACRO MEMSET
+	ld hl, \1 ; Destination
+	ld de, \1 + \3 ; Destination end
+.Loop\@:
+	IF \2 == 0
+		xor a
+	ELSE
+		ld a, \2
+	ENDC
+	ld [hl+], a
+
+	ld a, l
+	cp a, e
+	jr nz, .Loop\@
+	ld a, h
+	cp a, d
+	jr nz, .Loop\@
+ENDM
+
+MACRO LD_VX_PTR
+    IF STRIN("\1", "de")
+        ld de, V0
+    ELSE
+        ld hl, V0
+    ENDC
+    
     ld a, b
     and a, $0F
 
-	add a, l
-	ld l, a
-	adc a, h
-	sub l
-	ld h, a
+    IF STRIN("\1", "de")
+        add a, e
+        ld e, a
+        adc a, d
+        sub e
+        ld d, a
+    ELSE
+        add a, l
+        ld l, a
+        adc a, h
+        sub l
+        ld h, a
+    ENDC
 ENDM
 
-MACRO LD_VY_HL
-    ld hl, V0
+MACRO LD_VY_PTR
+    IF STRIN("\1", "de")
+        ld de, V0
+    ELSE
+        ld hl, V0
+    ENDC
+    
     ld a, c
     and a, $F0
     swap a
 
-	add a, l
-	ld l, a
-	adc a, h
-	sub l
-	ld h, a
+    IF STRIN("\1", "de")
+        add a, e
+        ld e, a
+        adc a, d
+        sub e
+        ld d, a
+    ELSE
+        add a, l
+        ld l, a
+        adc a, h
+        sub l
+        ld h, a
+    ENDC
+ENDM
+
+MACRO LD_VF_PTR
+	ld hl, V0 + $F
 ENDM
 
 MACRO LD_NNN
 	ld a, b
 	and a, $0F
 	ld b, a
+ENDM
+
+; First parameter is table address, 256 byte aligned! Index is stored in A.
+MACRO JP_TABLE ; 
+	add a, a ; addresses are 2 bytes, so multiply by 2
+	ld h, HIGH(\1)
+	ld l, a
+
+	ld a, [hl+]
+	ld h, [hl]
+	ld l, a
+	jp hl
 ENDM
 
 SECTION "VBlank Handler", ROM0[$0040]
@@ -73,67 +154,39 @@ EntryPoint:
 	ld a, IEF_VBLANK
 	ld [rIE], a
 
-	; Waiting for vblank and disabling lcd to copy tile map
+	; Waiting for vblank and disabling lcd to copy tile map and set initial tiles.
 	ei 
 	halt 
 	xor a
 	ld [rLCDC], a
 
-	ld hl, $9800
-	ld de, TileMap
-	ld bc, TileMapEnd - TileMap
-.CopyTileMap:
-	ld a, [de]
-	ld [hl+], a
+	; Setting white to 11; light gray to 10; dark gray to 01; black to 00.
+	ld a, %00011011 
+	ld [rBGP], a
 
-	inc de
-	dec bc
-	ld a, b
-	or a, c
-	jr nz, .CopyTileMap
+	MEMCPY $9800, TileMap, TileMapEnd
+	MEMSET _VRAM8000 + 16, $00, 32 * 16
 
-	; Setting chip8 screen to black.
-	ld hl, _VRAM8000 + 16 ; First tile is reserved blank
-	ld bc, SCREEN_BUF
-	ld de, 32 * 16
-
-.SetTiles:
+	; Setting first tile (background) to dark gray.
+	ld hl, _VRAM8000
+	ld e, 8
+.Loop:
 	ld a, $FF
 	ld [hl+], a
-	dec de
-	ld a, d
-	or a, e
-	jr nz, .SetTiles
+	xor a
+	ld [hl+], a
+	dec e
+	jr nz, .Loop
 
+	; Turn LCD back on.
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
 	ld [rLCDC], a
 
-	; Copy chip8 rom to ram
-	ld bc, CHIP_ROM
-	ld hl, CHIP_RAM + $200
-	ld de, CHIP_ROM_END - CHIP_ROM
-.CopyChipROM:
-	ld a, [bc]
-	ld [hl+], a
+	; Init chip8
+	MEMCPY CHIP_RAM + $200, CHIP_ROM, CHIP_ROM_END
+	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
 
-	inc bc
-	dec de
-	ld a, d
-	or a, e
-	jp nz, .CopyChipROM
-
-	; Resetting state
-	ld hl, CHIP_STATE
-	ld bc, CHIP_STATE_END - CHIP_STATE
-.ZeroState:
-	xor a
-	ld [hl+], a
-	dec bc
-	ld a, b
-	or a, c
-	jr nz, .ZeroState
-
-	; Reset PC
+	; Reset chip8 PC
 	ld bc, $200
 	push bc
 
@@ -155,21 +208,11 @@ InstrLoop:
 	ld b, a
 	ld c, [hl]
 
-	; Loading jump table address to hl based on first nibble of BC
+	; Jumping to opcode handler based on first opcode nibble.
 	ld a, b
 	and a, $F0
 	swap a
-	ld l, a
-	ld h, 0
-	add hl, hl ; addresses are 2 bytes, so multiply by 2
-
-	; Loading address of the function and jumping to it.
-	ld de, MainJumpTable
-	add hl, de
-	ld a, [hl+]   
-    ld h, [hl]    
-    ld l, a
-    jp hl  
+	JP_TABLE(MainJumpTable)
 
 InstrDecodeEnd:
 	; Dont render if draw flag is not set
@@ -205,17 +248,17 @@ FOR i, 0, 8
 	ld a, [hl]
 	jr z, .OffPixel\@
 
-	and a, ~(%10000000 >> i)
+	or a, %10000000 >> i
 	ld [hl+], a
 	ld a, [hl]	
-	and a, ~(%10000000 >> i)
+	or a, %10000000 >> i
 
 	jr .End\@
 .OffPixel\@
-	or a, %10000000 >> i
+	and a, ~(%10000000 >> i)
 	ld [hl+], a
 	ld a, [hl]	
-	or a, %10000000 >> i
+	and a, ~(%10000000 >> i)
 .End\@
 	ld [hl-], a
 	inc bc
@@ -261,13 +304,17 @@ ENDR
 	jp .HEIGHT_LOOP
 
 .End:
-	ld de, SCREEN_BUF_END 
-
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
 	ld [rLCDC], a
 	jp InstrLoop
 
 ;; Instruction decoding, table for matching on first nibble
+
+SECTION "Main Jump Table", ROM0, ALIGN[8] 
+MainJumpTable:
+    dw Case0, Case1, Case2, Case3, Case4, Case5, Case6, Case7,
+    dw Case8, Case9, CaseA, CaseB, CaseC, CaseD, CaseE, CaseF  
+
 Case0:
 	; if first nibble is not zero, instruction is invalid.
 	and a, b
@@ -302,23 +349,13 @@ OP_00EE: ; Ret from function
 
 	jp InstrDecodeEnd
 
-OP_00E0: ; Clear screen | REWRITE AFTER DXYN!!!
-	ld hl, SCREEN_BUF
-	ld de, 2048
-
-ClearBufLoop:
-	xor a
-	ld [hl+], a
-	dec de
-	ld a, d
-	or a, e
-	jr nz, ClearBufLoop
-
+OP_00E0: ; Clear screen
+	MEMSET SCREEN_BUF, 0, SCREEN_BUF_END - SCREEN_BUF
 	jp InstrDecodeEnd
 
 Case1: 
 OP_1NNN: ; Jump NNN
-	LD_NNN
+	LD_NNN()
 	pop af
 	push bc
 	
@@ -340,7 +377,7 @@ OP_2NNN: ; Call function
 	pop DE
 
 	; Setting PC to new address.
-	LD_NNN
+	LD_NNN()
 	push bc
 
 	; Now save DE to the stack
@@ -354,9 +391,7 @@ OP_2NNN: ; Call function
 
 	jp InstrDecodeEnd
 
-Case3:
-
-MACRO COND_PC_ADD 
+MACRO COND_PC_ADD ; If first parameter is 1, add if equal. Else, add if not equal.
 	IF \1 == 1
 		jp nz, InstrDecodeEnd
 	ELSE
@@ -370,21 +405,22 @@ MACRO COND_PC_ADD
 	push hl
 ENDM
 
+Case3:
 OP_3XNN:
-	LD_VX_HL
+	LD_VX_PTR()
 	ld a, [hl]
 	cp a, c
+	COND_PC_ADD(1) ; Check if equal
 
-	COND_PC_ADD 1 ; Check if equal
 	jp InstrDecodeEnd
 
 Case4:
 OP_4XNN:
-	LD_VX_HL
+	LD_VX_PTR()
 	ld a, [hl]
 	cp a, c
+	COND_PC_ADD(0) ; Check if not equal
 
-	COND_PC_ADD 0 ; Check if not equal
 	jp InstrDecodeEnd
 
 Case5:
@@ -393,24 +429,24 @@ OP_5XY0:
 	and a
 	jp nz, InstrDecodeEnd ; Invalid instruction
 
-	LD_VY_HL
-	ld e, [hl]
-	LD_VX_HL
-	ld a, [hl]
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
 
-	cp a, e
-	COND_PC_ADD 1
+	ld a, [de]
+	cp a, [hl]
+	COND_PC_ADD(1)
+
 	jp InstrDecodeEnd
 
 Case6:
 OP_6XNN:
-	LD_VX_HL
+	LD_VX_PTR()
 	ld [hl], c
 	jp InstrDecodeEnd
 
 Case7:
 OP_7XNN:
-	LD_VX_HL
+	LD_VX_PTR()
 	ld a, [hl]
 	add a, c
 	ld [hl], a
@@ -418,21 +454,23 @@ OP_7XNN:
 	jp InstrDecodeEnd
 
 Case8:
-	jp InstrDecodeEnd
+	ld a, c
+	and a, $F
+	JP_TABLE(_8XYJumpTable)
 
 Case9:
-OP_9XY0:
+OP_9XY0: ; TO CHECK
 	ld a, c
 	and a
 	jp nz, InstrDecodeEnd ; Invalid instruction
 
-	LD_VY_HL
-	ld e, [hl]
-	LD_VX_HL
-	ld a, [hl]
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
 
-	cp a, e
-	COND_PC_ADD 0
+	ld a, [de]
+	cp a, [hl]
+	COND_PC_ADD(0)
+
 	jp InstrDecodeEnd
 
 CaseA: 
@@ -451,7 +489,7 @@ OP_ANNN:
 CaseB:
 OP_BNNN: ; Quirk off, jump to V[0] + NNN
 	ld hl, V0
-	LD_NNN
+	LD_NNN()
 
 	ld l, [hl]
 	ld h, 0
@@ -470,13 +508,13 @@ OP_CXNN: ; RNG, TODO. Use DIV timer / joypad?
 CaseD: ; DXYN!!! ; REWRIITE!;  TODO: collision and clipping
 
 	; Loading X to E
-	LD_VX_HL
+	LD_VX_PTR()
 	ld a, [hl]
 	and a, 64 - 1
 	ld e, a
 
 	; Saving Y on the stack.
-	LD_VY_HL
+	LD_VY_PTR()
 	ld a, [hl]
 	and a, 32 - 1
 	ld hl, sp - 1
@@ -554,19 +592,244 @@ CaseD: ; DXYN!!! ; REWRIITE!;  TODO: collision and clipping
 	ld [DRAW_FLAG], a
 
 .DXYN_END:
-	inc sp ; restoring sp || WHEN ADD COLLISIONG FLAG CHANGE TO ADD, 2
+	inc sp ; 
 	jp InstrDecodeEnd
 	
 CaseE:
 	jp InstrDecodeEnd
 	
 CaseF:
+	ld a, c
+	and a, $7F
+	JP_TABLE(FXJumpTable)
+
+SECTION "8XY Jump Table", ROM0, ALIGN[8] 
+_8XYJumpTable:
+	dw _8XY0, _8XY1, _8XY2, _8XY3, _8XY4, _8XY5, _8XY6, _8XY7,
+	dw InstrDecodeEnd, InstrDecodeEnd, InstrDecodeEnd, InstrDecodeEnd, ; Invalid instructions
+	dw InstrDecodeEnd, InstrDecodeEnd, _8XYE, InstrDecodeEnd
+
+_8XY0:
+	LD_VY_PTR()
+	ld e, [hl]
+
+	LD_VX_PTR()
+	ld [hl], e
+
+	jp InstrDecodeEnd
+_8XY1:
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
+
+	ld a, [de]
+	or a, [hl]
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY2:
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
+
+	ld a, [de]
+	and a, [hl]
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY3:
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
+
+	ld a, [de]
+	xor a, [hl]
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY4:
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
+
+	ld a, [de]
+	add a, [hl]
+	ld [hl], a
+
+	; Getting carry
+	sbc a, a
+	and a, $1
+
+	LD_VF_PTR()
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY5:
+	LD_VX_PTR("de")
+	LD_VY_PTR("hl")
+
+	ld a, [de]
+	sub a, [hl]
+	ld [de], a
+
+	; Getting inverse carry
+	sbc a, a
+	inc a
+
+	LD_VF_PTR()
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY6:
+	LD_VX_PTR()
+	ld a, [hl]
+	rra ; Can use rra instead of srl because carry is guaranteed to be clear after LD_VX_PTR.
+	ld [hl], a
+
+	sbc a, a
+	and a, $1
+	
+	LD_VF_PTR()
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XY7:
+	LD_VX_PTR("hl")
+	LD_VY_PTR("de")
+
+	ld a, [de]
+	sub a, [hl]
+	ld [hl], a
+
+	sbc a, a
+	inc a
+
+	LD_VF_PTR()
+	ld [hl], a
+
+	jp InstrDecodeEnd
+_8XYE:
+	LD_VX_PTR()
+	ld a, [hl]
+	rla ; Can use rla instead of sla because carry is guaranteed to be clear after LD_VX_PTR.
+	ld [hl], a
+
+	sbc a, a
+	and a, $1
+	
+	LD_VF_PTR()
+	ld [hl], a
+
 	jp InstrDecodeEnd
 
-MainJumpTable:
-    dw Case0, Case1, Case2, Case3, Case4, Case5, Case6, Case7,
-    dw Case8, Case9, CaseA, CaseB, CaseC, CaseD, CaseE, CaseF   
+; Matching on both lower nibbles, 128 entries (nibbles will be masked with 127)
+SECTION "FX Jump Table", ROM0, ALIGN[8]
+FXJumpTable:
+	ds 14, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; (Invalid instructions) $00-$06
+    dw FX07                                          ; $07
+    ds 04, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $08-$09
+    dw FX0A                                          ; $0A
+    ds 20, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $0B-$14
+    dw FX15                                          ; $15
+    ds 04, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $16-$17
+    dw FX18                                          ; $18
+    ds 10, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $19-$1D
+    dw FX1E                                          ; $1E
+    ds 20, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $1F-$28
+    dw FX29                                          ; $29
+    ds 18, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $2A-$32
+    dw FX33                                          ; $33
+    ds 66, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $34-$54
+    dw FX55                                          ; $55
+    ds 30, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $56-$64
+    dw FX65                                          ; $65
+    ds 52, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $66-$7F
 
+FX07:
+	ld hl, DELAY_TIMER
+	ld e, [hl]
+	LD_VX_PTR();
+	ld [hl], e
+
+	jp InstrDecodeEnd
+
+FX0A:
+	; INPUT, TODO
+
+	jp InstrDecodeEnd
+
+FX15:
+	LD_VX_PTR()
+	ld e, [hl]
+	ld hl, DELAY_TIMER
+	ld [hl], e
+
+	jp InstrDecodeEnd
+
+FX18:
+	LD_VX_PTR()
+	ld e, [hl]
+	ld hl, SOUND_TIMER
+	ld [hl], e
+
+	jp InstrDecodeEnd
+
+FX1E:
+	LD_VX_PTR();
+	ld e, [hl]
+
+	ld hl, I_REG
+	ld a, [hl+]
+	ld d, [hl]
+
+	add a, e
+	ld e, a
+	ld a, d
+	adc a, 0
+
+	ld [hl-], a
+	ld [hl], e
+
+	jp InstrDecodeEnd
+
+FX29:
+	; TODO! 
+	jp InstrDecodeEnd
+
+FX33:
+
+	jp InstrDecodeEnd
+
+MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
+	ld a, b
+	and a, $F
+	ld e, a ; Number of registers to store
+	inc e ; V[x] is included
+
+	ld hl, I_REG
+	ld a, [hl+]
+	ld c, a
+	ld b, [hl]
+
+	ld hl, CHIP_RAM
+	add hl, bc
+	ld bc, V0
+.CopyLoop\@
+	IF \1 == 1
+		ld a, [bc]
+		ld [hl+], a
+	ELSE
+		ld a, [hl+]
+		ld [bc], a
+	ENDC
+	inc bc
+	dec e
+	jr nz, .CopyLoop\@
+ENDM
+
+FX55: 
+	REG_STORE(1)
+	jp InstrDecodeEnd
+
+FX65: 
+	REG_STORE(0)
+	jp InstrDecodeEnd
 
 SECTION "Chip8 ROM", ROM0
 CHIP_ROM:

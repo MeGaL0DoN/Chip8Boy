@@ -60,13 +60,13 @@ MACRO LD_V_PTR
         add a, e
         ld e, a
         adc a, d
-        sub e
+        sub a, e
         ld d, a
     ELSE
         add a, l
         ld l, a
         adc a, h
-        sub l
+        sub a, l
         ld h, a
     ENDC
 ENDM
@@ -77,10 +77,6 @@ ENDM
 
 MACRO LD_VY_PTR
     LD_V_PTR \1, c, 1
-ENDM
-
-MACRO LD_VF_PTR
-	ld hl, V0 + $F
 ENDM
 
 MACRO LD_NNN
@@ -104,7 +100,7 @@ ENDM
 SECTION "VBlank Handler", ROM0[$0040]
     ret
 
-SECTION "chipState", WRAM0
+SECTION "ChipState", HRAM
 CHIP_STATE:
 STACK:
 	ds 32
@@ -117,16 +113,19 @@ DELAY_TIMER:
 SOUND_TIMER:
 	ds 1
 V0:
-	ds 16
+	ds 15
+VF:
+	ds 1
+DRAW_FLAG:
+	ds 1
+CHIP_STATE_END:
+
+SECTION "ChipScreenBuf", WRAM0
 SCREEN_BUF:
 	ds 2048
 SCREEN_BUF_END:
-DRAW_FLAG:
-	ds 1
 
-CHIP_STATE_END:
-
-SECTION "chipRAM", WRAMX
+SECTION "ChipRAM", WRAMX
 CHIP_RAM:
 	ds 4096
 
@@ -137,21 +136,21 @@ SECTION "Header", ROM0[$100]
 EntryPoint:
 	; Shut down audio circuitry
 	xor a
-	ld [rNR52], a
+	ldh [rNR52], a
 
 	; set IE to vblank enable
 	ld a, IEF_VBLANK
-	ld [rIE], a
+	ldh [rIE], a
 
 	; Waiting for vblank and disabling lcd to copy tile map and set initial tiles.
 	ei 
 	halt 
 	xor a
-	ld [rLCDC], a
+	ldh [rLCDC], a
 
 	; Setting white to 11; light gray to 10; dark gray to 01; black to 00.
 	ld a, %00011011 
-	ld [rBGP], a
+	ldh [rBGP], a
 
 	MEMCPY $9800, TileMap, TileMapEnd
 	MEMSET _VRAM8000 + 16, $00, 32 * 16
@@ -168,11 +167,12 @@ ENDR
 
 	; Turn LCD back on.
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-	ld [rLCDC], a
+	ldh [rLCDC], a
 
 	; Init chip8
 	MEMCPY CHIP_RAM + $200, CHIP_ROM, CHIP_ROM_END
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
+	MEMSET SCREEN_BUF, 0, SCREEN_BUF_END - SCREEN_BUF
 
 	; Reset chip8 PC
 	ld bc, $200
@@ -293,7 +293,7 @@ ENDR
 
 .End:
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-	ld [rLCDC], a
+	ldh [rLCDC], a
 	jp InstrLoop
 
 ;; Instruction decoding, table for matching on first nibble
@@ -315,12 +315,12 @@ Case0:
 	jp nz, InstrDecodeEnd ; Invalid instruction
 
 OP_00EE: ; Ret from function
-	ld hl, CHIP_SP
-	ld a, [hl]
+	ld c, CHIP_SP - $FF00
+	ldh a, [c]
 	; Updating SP
 	sub a, 2
 	and a, $1F
-	ld [hl], a
+	ldh [c], a
 
 	; Loading address from the stack into BC
 	; Not setting B to 0, since its guaranteed (opcode starts with 00).
@@ -351,22 +351,22 @@ OP_1NNN: ; Jump NNN
 
 Case2:
 OP_2NNN: ; Call function
-	ld hl, CHIP_SP
-	ld e, [hl]
-
-	; Updating SP (Dont use the updated sp now though.)
-	ld a, e
-	add a, 2
-	and a, $1F
-	ld [hl], a
-
-	; Save SP (E) to L and load current PC to DE
-	ld l, e
+	
+	; load current PC to DE
 	pop DE
 
 	; Setting PC to new address.
 	LD_NNN()
 	push bc
+
+	ld c, CHIP_SP - $FF00
+	ldh a, [c]
+	ld l, a ; Saving current SP.
+
+	; Updating SP.
+	add a, 2
+	and a, $1F
+	ldh [c], a
 
 	; Now save DE to the stack
 	ld b, 0
@@ -447,7 +447,7 @@ Case8:
 	JP_TABLE(_8XYJumpTable)
 
 Case9:
-OP_9XY0: ; TO CHECK
+OP_9XY0: 
 	ld a, c
 	and a
 	jp nz, InstrDecodeEnd ; Invalid instruction
@@ -643,9 +643,7 @@ _8XY4:
 	; Getting carry
 	sbc a, a
 	and a, $1
-
-	LD_VF_PTR()
-	ld [hl], a
+	ldh [VF], a
 
 	jp InstrDecodeEnd
 _8XY5:
@@ -659,22 +657,18 @@ _8XY5:
 	; Getting inverse carry
 	sbc a, a
 	inc a
-
-	LD_VF_PTR()
-	ld [hl], a
+	ldh [VF], a
 
 	jp InstrDecodeEnd
 _8XY6:
 	LD_VX_PTR()
 	ld a, [hl]
-	rra ; Can use rra instead of srl because carry is guaranteed to be clear after LD_VX_PTR.
+	srl a
 	ld [hl], a
 
 	sbc a, a
 	and a, $1
-	
-	LD_VF_PTR()
-	ld [hl], a
+	ldh [VF], a
 
 	jp InstrDecodeEnd
 _8XY7:
@@ -687,22 +681,18 @@ _8XY7:
 
 	sbc a, a
 	inc a
-
-	LD_VF_PTR()
-	ld [hl], a
+	ldh [VF], a
 
 	jp InstrDecodeEnd
 _8XYE:
 	LD_VX_PTR()
 	ld a, [hl]
-	rla ; Can use rla instead of sla because carry is guaranteed to be clear after LD_VX_PTR.
+	sla a
 	ld [hl], a
 
 	sbc a, a
 	and a, $1
-	
-	LD_VF_PTR()
-	ld [hl], a
+	ldh [VF], a
 
 	jp InstrDecodeEnd
 
@@ -730,10 +720,9 @@ FXJumpTable:
     ds 52, LOW(InstrDecodeEnd), HIGH(InstrDecodeEnd) ; $66-$7F
 
 FX07:
-	ld hl, DELAY_TIMER
-	ld e, [hl]
 	LD_VX_PTR();
-	ld [hl], e
+	ldh a, [DELAY_TIMER]
+	ld [hl], a
 
 	jp InstrDecodeEnd
 
@@ -744,17 +733,15 @@ FX0A:
 
 FX15:
 	LD_VX_PTR()
-	ld e, [hl]
-	ld hl, DELAY_TIMER
-	ld [hl], e
+	ld a, [hl]
+	ldh [DELAY_TIMER], a
 
 	jp InstrDecodeEnd
 
 FX18:
 	LD_VX_PTR()
-	ld e, [hl]
-	ld hl, SOUND_TIMER
-	ld [hl], e
+	ld a, [hl]
+	ldh [SOUND_TIMER], a
 
 	jp InstrDecodeEnd
 

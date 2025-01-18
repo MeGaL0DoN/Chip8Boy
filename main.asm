@@ -22,9 +22,9 @@ ENDM
 
 MACRO MEMSET
 	ld hl, \1 ; Destination
-	ld de, \1 + \3 ; Destination end
+	ld de, \1 + \3 ; Destination end (because instead size is passed in \3)
 .Loop\@:
-	IF \2 == 0
+	IF \2 == 0 ; Value to set
 		xor a
 	ELSE
 		ld a, \2
@@ -39,14 +39,21 @@ MACRO MEMSET
 	jr nz, .Loop\@
 ENDM
 
-MACRO LD_VX_PTR
+MACRO LD_V_PTR
+    ; \1 = "de" or "hl"
+    ; \2 = register to use (b/c)
+    ; \3 = whether to swap first (0/1)
+    
     IF STRIN("\1", "de")
         ld de, V0
     ELSE
         ld hl, V0
     ENDC
     
-    ld a, b
+    ld a, \2
+    IF \3
+        swap a
+    ENDC
     and a, $0F
 
     IF STRIN("\1", "de")
@@ -64,30 +71,12 @@ MACRO LD_VX_PTR
     ENDC
 ENDM
 
-MACRO LD_VY_PTR
-    IF STRIN("\1", "de")
-        ld de, V0
-    ELSE
-        ld hl, V0
-    ENDC
-    
-    ld a, c
-    and a, $F0
-    swap a
+MACRO LD_VX_PTR
+    LD_V_PTR \1, b, 0
+ENDM
 
-    IF STRIN("\1", "de")
-        add a, e
-        ld e, a
-        adc a, d
-        sub e
-        ld d, a
-    ELSE
-        add a, l
-        ld l, a
-        adc a, h
-        sub l
-        ld h, a
-    ENDC
+MACRO LD_VY_PTR
+    LD_V_PTR \1, c, 1
 ENDM
 
 MACRO LD_VF_PTR
@@ -169,14 +158,13 @@ EntryPoint:
 
 	; Setting first tile (background) to dark gray.
 	ld hl, _VRAM8000
-	ld e, 8
-.Loop:
-	ld a, $FF
+	ld e, $FF
+REPT 8
+	ld a, e
 	ld [hl+], a
 	xor a
 	ld [hl+], a
-	dec e
-	jr nz, .Loop
+ENDR
 
 	; Turn LCD back on.
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
@@ -792,34 +780,71 @@ FX29:
 	; TODO! 
 	jp InstrDecodeEnd
 
+MACRO LD_I_MEM_PTR
+	ld hl, I_REG
+	ld a, [hl+]
+	ld e, a
+	ld d, [hl]
+
+	ld hl, CHIP_RAM
+	add hl, de
+ENDM
+
 FX33:
+	LD_I_MEM_PTR()
+	LD_VX_PTR("de")
+
+	ld a, [de]
+	ld b, 100
+	ld c, -1
+
+.CountHundreds:
+	inc c
+	sub a, b
+	jr nc, .CountHundreds
+
+	add a, b
+	ld e, a
+
+	ld a, c
+	ld [hl+], a ; Storing hundreds
+
+	ld a, e
+	ld b, 10
+	ld c, -1
+
+.CountTenths:
+	inc c
+	sub a, b
+	jr nc, .CountTenths
+
+	add a, b
+	ld e, a
+
+	ld a, c
+	ld [hl+], a ; Storing tenths
+	ld [hl], e ; Storing ones
 
 	jp InstrDecodeEnd
 
 MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
 	ld a, b
 	and a, $F
-	ld e, a ; Number of registers to store
-	inc e ; V[x] is included
+	ld c, a ; Number of registers to store
+	inc c; V[x] is included
 
-	ld hl, I_REG
-	ld a, [hl+]
-	ld c, a
-	ld b, [hl]
-
-	ld hl, CHIP_RAM
-	add hl, bc
-	ld bc, V0
+	LD_I_MEM_PTR()
+	ld de, V0
 .CopyLoop\@
 	IF \1 == 1
-		ld a, [bc]
+		ld a, [de]
 		ld [hl+], a
 	ELSE
 		ld a, [hl+]
-		ld [bc], a
+		ld [de], a
 	ENDC
-	inc bc
-	dec e
+	inc de
+	dec c
 	jr nz, .CopyLoop\@
 ENDM
 
@@ -884,7 +909,6 @@ CHIP_ROM:
 CHIP_ROM_END:
 
 SECTION "Tilemap", ROM0
-
 TileMap:
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

@@ -209,92 +209,106 @@ InstrDecodeEnd:
 	or a, [hl]
 	jp z, InstrLoop
 
-	ld [hl], 0 ; reset draw flag
-	
+	ld [hl], 0 
+
 	; Waiting for vblank and disabling lcd
-	ld [rIF], a ; A is still zero, resetting IF to clear vblank if its set.
-	ei
-	halt 
-	ld [rLCDC], a
+	ld [rIF], a 
+ 	ei
+ 	halt 
+ 	ld [rLCDC], a
 
-	; Converting chip8 screenbuf to tiles
+	MEMCPY _VRAM8000 + 16, SCREEN_BUF, SCREEN_BUF_END
 
-	ld bc, SCREEN_BUF
-	ld hl, _VRAM8000 + 16 ; First tile is reserved blank
-	push hl
-
-	; Row counter variable
-	ld de, 2
-	push de
-
-.HEIGHT_LOOP:
-	ld e, 8
-.WIDTH_LOOP:
-FOR i, 0, 8
-	ld a, [bc] ; Load screen buf pixel
-	and a, a ; Check if zero
-	ld a, [hl]
-	jr z, .OffPixel\@
-
-	or a, %10000000 >> i
-	ld [hl+], a
-	ld a, [hl]	
-	or a, %10000000 >> i
-
-	jr .End\@
-.OffPixel\@
-	and a, ~(%10000000 >> i)
-	ld [hl+], a
-	ld a, [hl]	
-	and a, ~(%10000000 >> i)
-.End\@
-	ld [hl-], a
-	inc bc
-ENDR
-	; Adding 16 bytes to move to next horizontal tile
-	ld a, e
-	ld de, 16
-	add hl, de
-	ld e, a
-
-	dec e
-	jp nz, .WIDTH_LOOP    
-
-	; Moving to the next row, and adding 2 to row counter variable
-	pop de
-	pop hl
-
-	ld a, e
-	cp a, $10
-	jr z, .NewTileRow
-
-	add sp, -2 ; Dont overwrite hl
-	add hl, de
-	inc e
-	inc e
-	push de
-	jp .HEIGHT_LOOP
-.NewTileRow:
-	ld e, $80
-	add hl, de
-
-	ld a, h
-	cp a, (_VRAM8000 + 16 + (32 * 16)) >> 8
-	jr nz, .Continue
-	ld a, l
-	cp a, (_VRAM8000 + 16 + (32 * 16)) & $FF
-	jr z, .End
-
-.Continue:
-	push hl
-	ld e, 2
-	push de
-	jp .HEIGHT_LOOP
-
-.End:
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
 	ldh [rLCDC], a
 	jp InstrLoop
+
+; 	ld [hl], 0 ; reset draw flag
+	
+; 	; Waiting for vblank and disabling lcd
+; 	ld [rIF], a ; A is still zero, resetting IF to clear vblank if its set.
+; 	ei
+; 	halt 
+; 	ld [rLCDC], a
+
+; 	; Converting chip8 screenbuf to tiles
+
+; 	ld bc, SCREEN_BUF
+; 	ld hl, _VRAM8000 + 16 ; First tile is reserved blank
+; 	push hl
+
+; 	; Row counter variable
+; 	ld de, 2
+; 	push de
+
+; .HEIGHT_LOOP:
+; 	ld e, 8
+; .WIDTH_LOOP:
+; FOR i, 0, 8
+; 	ld a, [bc] ; Load screen buf pixel
+; 	and a, a ; Check if zero
+; 	ld a, [hl]
+; 	jr z, .OffPixel\@
+
+; 	or a, %10000000 >> i
+; 	ld [hl+], a
+; 	ld a, [hl]	
+; 	or a, %10000000 >> i
+
+; 	jr .End\@
+; .OffPixel\@
+; 	and a, ~(%10000000 >> i)
+; 	ld [hl+], a
+; 	ld a, [hl]	
+; 	and a, ~(%10000000 >> i)
+; .End\@
+; 	ld [hl-], a
+; 	inc bc
+; ENDR
+; 	; Adding 16 bytes to move to next horizontal tile
+; 	ld a, e
+; 	ld de, 16
+; 	add hl, de
+; 	ld e, a
+
+; 	dec e
+; 	jp nz, .WIDTH_LOOP    
+
+; 	; Moving to the next row, and adding 2 to row counter variable
+; 	pop de
+; 	pop hl
+
+; 	ld a, e
+; 	cp a, $10
+; 	jr z, .NewTileRow
+
+; 	add sp, -2 ; Dont overwrite hl
+; 	add hl, de
+; 	inc e
+; 	inc e
+; 	push de
+; 	jp .HEIGHT_LOOP
+; .NewTileRow:
+; 	ld e, $80
+; 	add hl, de
+
+; 	ld a, h
+; 	cp a, (_VRAM8000 + 16 + (32 * 16)) >> 8
+; 	jr nz, .Continue
+; 	ld a, l
+; 	cp a, (_VRAM8000 + 16 + (32 * 16)) & $FF
+; 	jr z, .End
+
+; .Continue:
+; 	push hl
+; 	ld e, 2
+; 	push de
+; 	jp .HEIGHT_LOOP
+
+; .End:
+	; ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
+	; ldh [rLCDC], a
+	; jp InstrLoop
 
 ;; Instruction decoding, table for matching on first nibble
 
@@ -493,95 +507,146 @@ CaseC:
 OP_CXNN: ; RNG, TODO. Use DIV timer / joypad?
 	jp InstrDecodeEnd
 
-CaseD: ; DXYN!!! ; REWRIITE!;  TODO: collision and clipping
+MACRO LD_I_MEM_PTR
+	ld hl, I_REG
+	ld a, [hl+]
+	ld e, a
+	ld d, [hl]
 
-	; Loading X to E
+	ld hl, CHIP_RAM
+	add hl, de
+ENDM
+
+CaseD: 
 	LD_VX_PTR()
+	ld a, [hl]
+	and a, 64 - 1
+	ld d, a
+
+	LD_VY_PTR()
 	ld a, [hl]
 	and a, 64 - 1
 	ld e, a
 
-	; Saving Y on the stack.
-	LD_VY_PTR()
-	ld a, [hl]
-	and a, 32 - 1
-	ld hl, sp - 1
-	ld [hl], a
-	dec sp
-
 	; No longer need to save BC register, storing height - 1 into c.
-	ld a, c
-	and a, $0F
-	jp z, .DXYN_END
-	dec a
-	ld c, a
+ 	ld a, c
+ 	and a, $0F
+ 	jp z, InstrDecodeEnd ; Height is 0
+ 	dec a
+ 	ld c, a
 
-	ld b, 0 ; Width loop counter
+	xor a
+	ldh [VF], a
 
-.HEIGHT_LOOP:	
-	; Loading sprite data byte into reg D
-	push de
-	ld hl, I_REG
-	ld e, [hl]
-	inc hl
-	ld d, [hl]
-	ld hl, CHIP_RAM
-	add hl, de
-	add hl, bc ; B is zero (width counter was reset), C is current height counter
+.HEIGHT_LOOP:
+	LD_I_MEM_PTR();
+	ld b, [hl]
 
-	pop de
-	ld d, [hl]
+	FOR i, 0, 8
+		ld a, b
+		and a, ($80 >> i)
+		jr z, .End\@
 
-	; Loading initial Y into hl
-	ld hl, sp + 0
-	ld l, [hl]
-	ld h, 0
+		ld hl, SCREEN_BUF
 
-	; Setting HL to screenBuf[(y + row) * 64 + x]
-	add hl, bc
+		.End\@:
+		inc d
+	ENDR
 
-	add hl, hl
-	add hl, hl
-	add hl, hl
-	add hl, hl
-	add hl, hl
-	add hl, hl
-
-	push de
-	ld d, 0
-	add hl, de ; Adding X
-	ld de, SCREEN_BUF
-	add hl, de
-	pop de
-	;;;
-
-	ld b, $80 ; Setting width loop counter (msb set)
-
-.WIDTH_LOOP:
-	ld a, d ; Loading sprite data
-	and a, b
-	jr z, .WIDTH_LOOP_END
-	
-	ld a, [hl]
-	xor a, 1
-	ld [hl], a
-
-.WIDTH_LOOP_END:
-	inc hl ; Point to next screen buf pixel.
-	srl b
-	jr nz, .WIDTH_LOOP
-
-	ld a, c
-	sub a, 1
-	ld c, a
+	inc e
+	dec c
 	jr nc, .HEIGHT_LOOP
 
-	ld a, 1
-	ld [DRAW_FLAG], a
-
-.DXYN_END:
-	inc sp ; 
 	jp InstrDecodeEnd
+
+
+; 	; Loading X to E
+; 	LD_VX_PTR()
+; 	ld a, [hl]
+; 	and a, 64 - 1
+; 	ld e, a
+
+; 	; Saving Y on the stack.
+; 	LD_VY_PTR()
+; 	ld a, [hl]
+; 	and a, 32 - 1
+; 	ld hl, sp - 1
+; 	ld [hl], a
+; 	dec sp
+
+; 	; No longer need to save BC register, storing height - 1 into c.
+; 	ld a, c
+; 	and a, $0F
+; 	jp z, .DXYN_END
+; 	dec a
+; 	ld c, a
+
+; 	ld b, 0 ; Width loop counter
+
+; .HEIGHT_LOOP:	
+; 	; Loading sprite data byte into reg D
+; 	push de
+; 	ld hl, I_REG
+; 	ld e, [hl]
+; 	inc hl
+; 	ld d, [hl]
+; 	ld hl, CHIP_RAM
+; 	add hl, de
+; 	add hl, bc ; B is zero (width counter was reset), C is current height counter
+
+; 	pop de
+; 	ld d, [hl]
+
+; 	; Loading initial Y into hl
+; 	ld hl, sp + 0
+; 	ld l, [hl]
+; 	ld h, 0
+
+; 	; Setting HL to screenBuf[(y + row) * 64 + x]
+; 	add hl, bc
+
+; 	add hl, hl
+; 	add hl, hl
+; 	add hl, hl
+; 	add hl, hl
+; 	add hl, hl
+; 	add hl, hl
+
+; 	push de
+; 	ld d, 0
+; 	add hl, de ; Adding X
+; 	ld de, SCREEN_BUF
+; 	add hl, de
+; 	pop de
+; 	;;;
+
+; 	ld b, $80 ; Setting width loop counter (msb set)
+
+; .WIDTH_LOOP:
+; 	ld a, d ; Loading sprite data
+; 	and a, b
+; 	jr z, .WIDTH_LOOP_END
+	
+; 	ld a, [hl]
+; 	xor a, 1
+; 	ld [hl], a
+
+; .WIDTH_LOOP_END:
+; 	inc hl ; Point to next screen buf pixel.
+; 	srl b
+; 	jr nz, .WIDTH_LOOP
+
+; 	ld a, c
+; 	sub a, 1
+; 	ld c, a
+; 	jr nc, .HEIGHT_LOOP
+
+; 	ld a, 1
+; 	ld [DRAW_FLAG], a
+
+; .DXYN_END:
+; 	inc sp 
+; 	jp InstrDecodeEnd
 	
 CaseE:
 	jp InstrDecodeEnd
@@ -767,16 +832,6 @@ FX29:
 	; TODO! 
 	jp InstrDecodeEnd
 
-MACRO LD_I_MEM_PTR
-	ld hl, I_REG
-	ld a, [hl+]
-	ld e, a
-	ld d, [hl]
-
-	ld hl, CHIP_RAM
-	add hl, de
-ENDM
-
 FX33:
 	LD_I_MEM_PTR()
 	LD_VX_PTR("de")
@@ -902,16 +957,16 @@ TileMap:
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
-	db 0,0,0,0,0,0, 01, 02, 03, 04, 05, 06, 07, 08,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0, 09, 10, 11, 12, 13, 14, 15, 16,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0, 17, 18, 19, 20, 21, 22, 23, 24,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0, 25, 26, 27, 28, 29, 30, 31, 32,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  001, 002, 003, 004, 005, 006, 007, 008, 009, 010, 011, 012, 013, 014, 015, 016,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  017, 018, 019, 020, 021, 022, 023, 024, 025, 026, 027, 028, 029, 030, 031, 032,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  033, 034, 035, 036, 037, 038, 039, 040, 041, 042, 043, 044, 045, 046, 047, 048,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  049, 050, 051, 052, 053, 054, 055, 056, 057, 058, 059, 060, 061, 062, 063, 064,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  065, 066, 067, 068, 069, 070, 071, 072, 073, 074, 075, 076, 077, 078, 079, 080,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  081, 082, 083, 084, 085, 086, 087, 088, 089, 090, 091, 092, 093, 094, 095, 096,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  097, 098, 099, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0,  113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128,  0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
-	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 	db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0

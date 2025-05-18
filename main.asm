@@ -2,7 +2,7 @@ INCLUDE "hardware.inc"
 INCLUDE "utils.asm"
 
 ; TO COMPILE RUN:
-; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -v -p 0xFF chip8boy.gb
+; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -C -v -p 0xFF chip8boy.gb
 
 MACRO LD_X
 	ld a, d
@@ -45,13 +45,6 @@ DEF NN EQUS "e"
 MACRO LD_N
 	ld a, NN
 	and $F
-ENDM
-
-; First nibble of the opcode
-MACRO LD_OP_ID
-	ld a, d
-	and $F0
-	swap a
 ENDM
 
 ; First parameter is table address, 256 byte aligned! Index is stored in A.
@@ -173,7 +166,7 @@ EntryPoint:
 	MEMSET $9800, 0, $400
 	MEMSET $9C00, 0, $400
 
-	res 0, a
+	xor a
 	ldh [rVBK], a
 
 	; Setting bg tile (used for area outside chip8 screen) to '10'
@@ -191,6 +184,23 @@ ENDR
 REPT 16
 	ld [hl+], a
 ENDR
+	; Setting palettes
+	ld a, $80
+	ldh [rBCPS], a ; Auto-increment, initial address 0.
+	; Color 00 (black chip8 pixel)
+	xor a
+	ldh [rBCPD], a
+	ldh [rBCPD], a
+	; Color 01 (white chip8 pixel)
+	ld a, $FF
+	ldh [rBCPD], a
+	ldh [rBCPD], a
+	; Color 10 (background, purple)
+	ld a, $9F
+	ldh [rBCPD], a
+	ld a, $4D
+	ldh [rBCPD], a
+
 	; Init chip8
 	MEMCPY CHIP_RAM + $200, CHIP_ROM, CHIP_ROM_END
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
@@ -227,8 +237,9 @@ InstrLoop:
 	ld d, a
 	ld e, [hl]
 
-	; Jumping to opcode handler based on first opcode nibble.
-	LD_OP_ID()
+	; Jumping to opcode handler based on the first opcode nibble.
+	and $F0
+	swap a
 	JP_TABLE(MainJumpTable)
 
 MACRO CONTINUE_FRAME
@@ -272,35 +283,37 @@ Case0:
 	jp nz, InvalidInstruction
 
 	ld a, NN
-	cp $E0
-	jr z, OP_00E0
 	cp $EE
+	jr z, OP_00EE
+	cp $E0
 	jp nz, InvalidInstruction
 
+OP_00E0: 
+	ld a, 1
+	ldh [CLEAR_SCREEN_FLAG], a
+	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
+	xor a
+	ldh [CLEAR_SCREEN_FLAG], a
+
+	jp InstrEnd
+
 OP_00EE: ; Ret from function
-	ld c, LOW(CHIP_SP)
-	ldh a, [c]
+	ldh a, [CHIP_SP]
 	; Updating SP
 	sub 2
 	and $1F
-	ldh [c], a
+	ldh [CHIP_SP], a
 
-	; Loading address from the chip8 stack into PC
-	ld hl, sp + 1
+	ld hl, sp + 0
 	add LOW(CHIP_STACK)
 	ld c, a
+	; Loading address from the chip8 stack into PC
 	ldh a, [c]
 	ld [hl+], a
 	inc c
 	ldh a, [c]
 	ld [hl], a
 
-	jp InstrEnd
-
-OP_00E0: 
-	ld a, 1
-	ldh [CLEAR_SCREEN_FLAG], a
-	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 	jp InstrEnd
 
 Case1: 
@@ -321,12 +334,11 @@ OP_2NNN: ; Call function
 	push de
 	
 	; Updating SP
-	ld c, LOW(CHIP_SP)
-	ldh a, [c]
+	ldh a, [CHIP_SP]
 	ld b, a ; Saving current SP
 	add 2
 	and $1F
-	ldh [c], a
+	ldh [CHIP_SP], a
 
 	; Saving HL to the chip8 stack
 	ld a, LOW(CHIP_STACK)

@@ -1,43 +1,8 @@
 INCLUDE "hardware.inc"
+INCLUDE "utils.asm"
 
 ; TO COMPILE RUN:
 ; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -v -p 0xFF chip8boy.gb
-
-MACRO MEMCPY
-	ld hl, \1 ; Destination
-	ld bc, \2 ; Source
-	ld de, \3 ; Source end
-.Loop\@:
-	ld a, [bc]
-	ld [hl+], a
-	inc bc
-
-	ld a, c
-	cp e
-	jr nz, .Loop\@
-	ld a, b
-	cp d
-	jr nz, .Loop\@
-ENDM
-
-MACRO MEMSET
-	ld hl, \1 ; Destination
-	ld de, \1 + \3 ; Destination end (because instead size is passed in \3)
-.Loop\@:
-	IF \2 == 0 ; Value to set
-		xor a
-	ELSE
-		ld a, \2
-	ENDC
-	ld [hl+], a
-
-	ld a, l
-	cp e
-	jr nz, .Loop\@
-	ld a, h
-	cp d
-	jr nz, .Loop\@
-ENDM
 
 MACRO LD_X
 	ld a, d
@@ -114,8 +79,8 @@ VBlankHandler:
 	ldh a, [CLEAR_SCREEN_FLAG]
 	and a
 	jr z, .copyScreen
-	; Will display next frame using 8800 (blank) tilemap instead, and not do copy.
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8800
+	; Will display next frame using 9C00 (blank) tilemap instead, and not do copy.
+	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000 | LCDCF_BG9C00
 	ldh [rLCDC], a
 	jr .end
 .copyScreen
@@ -178,29 +143,52 @@ SECTION "Header", ROM0[$100]
 	ds $150 - @, 0 ; Make room for the header
 
 EntryPoint:
+	; Enable double speed mode
+	set 0, a
+	ldh [rKEY1], a
+	stop
+
 	; Shut down audio circuitry
 	xor a
 	ldh [rNR52], a
 
-	; set IE to enable vblank interrupts
+	; Clear IF and set IE to enable vblank interrupts
+	ldh [rIF], a
 	ld a, IEF_VBLANK
 	ldh [rIE], a
 
-	; Waiting for vblank and disabling lcd to copy tile map and set initial tiles.
+	; Waiting for vblank and disabling lcd to copy tile map and set initial tiles
 	halt 
 	xor a
 	ldh [rLCDC], a
 
 	MEMCPY $9800, TILE_MAP, TILE_MAP_END
-	MEMSET _VRAM8000 + 16, 0, 32 * 16
+	MEMCPY $9C00, ZERO_TILE_MAP, ZERO_TILE_MAP_END
+	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
-	; Setting first tile (background) to dark gray.
-	ld hl, _VRAM8000
-	ld e, $FF
+	set 0, a
+	ldh [rVBK], a
+
+	; Set attribute maps to zeroes (use palette 0 and tile bank 0, no flips)
+	MEMSET $9800, 0, $400
+	MEMSET $9C00, 0, $400
+
+	res 0, a
+	ldh [rVBK], a
+
+	; Setting bg tile (used for area outside chip8 screen) to '10'
+	ld hl, BG_TILE
+	ld b, $FF
 REPT 8
-	ld a, e
-	ld [hl+], a
 	xor a
+	ld [hl+], a
+	ld a, b
+	ld [hl+], a
+ENDR
+	; Setting clear tile to '00'
+	ld hl, CLEAR_TILE
+	xor a
+REPT 16
 	ld [hl+], a
 ENDR
 	; Init chip8
@@ -208,17 +196,17 @@ ENDR
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
 	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
-	; Turn LCD back on.
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-	ldh [rLCDC], a
-
 	; Reset chip8 PC
 	ld de, $200
 	push de
 
-	ld a, IPF
+	; Turn LCD back on.
+	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
+	ldh [rLCDC], a
 	; Enable interrupts
 	ei
+
+	ld a, IPF
 
 InstrLoop:
 	ldh [INSTR_COUNT], a
@@ -248,7 +236,6 @@ MACRO CONTINUE_FRAME
 	dec a
 	jr nz, InstrLoop
 	halt ; Wait for VBlank
-	xor a
 	ldh [VBLANK_HIT_FLAG], a
 	ld a, IPF
 	jr InstrLoop
@@ -280,7 +267,8 @@ MainJumpTable:
 
 Case0:
 	; if first byte is not zero, instruction is invalid.
-	and d
+	ld a, d
+	and a
 	jp nz, InvalidInstruction
 
 	ld a, NN
@@ -369,7 +357,7 @@ ENDM
 Case3:
 OP_3XNN:
 	LD_VX()
-	cp a, NN
+	cp NN
 	COND_PC_ADD(1) ; Check if equal
 
 	jp InstrEnd
@@ -377,7 +365,7 @@ OP_3XNN:
 Case4:
 OP_4XNN:
 	LD_VX()
-	cp a, NN
+	cp NN
 	COND_PC_ADD(0) ; Check if not equal
 
 	jp InstrEnd
@@ -466,13 +454,16 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	LD_VX();
-	and 64 - 1
+	LD_VX()
+	and CHIP_SCR_WIDTH - 1
 	ld b, a
 
-	LD_VY();
-	and 32 - 1
-	ld c, a
+	LD_VY()
+	and CHIP_SCR_HEIGHT - 1
+	ld d, a
+
+	LD_N()
+	ld e, a 
 
 	jp InstrEnd
 	
@@ -805,14 +796,14 @@ ZERO_TILE_MAP:
 	ENDR
 	ENDR
 
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 	REPT 5
 	REPT 32

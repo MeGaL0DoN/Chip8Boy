@@ -47,6 +47,22 @@ MACRO LD_N
 	and $F
 ENDM
 
+MACRO LD_I_MEM_PTR
+	ldh a, [I_REG]
+	ld c, a
+	ldh a, [I_REG + 1]
+	ld b, a
+
+	ld hl, CHIP_RAM
+	add hl, bc
+ENDM
+
+MACRO CHECK_MEM_OOB
+	ld a, h
+	cp HIGH(CHIP_RAM_END)
+	jp z, HandleCrash
+ENDM
+
 ; First parameter is table address, 256 byte aligned! Index is stored in A.
 MACRO JP_TABLE ; 
 	add a ; addresses are 2 bytes, so multiply by 2
@@ -93,7 +109,7 @@ VBlankHandler:
 	pop af
     reti
 
-SECTION "ChipState", HRAM
+SECTION "Variables", HRAM
 CHIP_STATE:
 V0:
 	ds 15
@@ -118,12 +134,19 @@ VBLANK_HIT_FLAG:
 DROPPED_FRAMES:
 	ds 1
 CHIP_STATE_END:
+temp1:
+	ds 2
+temp2:
+	ds 2
+temp3:
+	ds 2
 
-SECTION "ChipRAM", WRAM0
+SECTION "ChipRAM", WRAMX
 CHIP_RAM:
 	ds 4096
+CHIP_RAM_END:
 
-SECTION "ChipScreenBuf", WRAMX, ALIGN[8]
+SECTION "ChipScreenBuf", WRAM0, ALIGN[8]
 SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
 
@@ -144,6 +167,9 @@ EntryPoint:
 	; Shut down audio circuitry
 	xor a
 	ldh [rNR52], a
+
+	; Set stack
+	ld sp, $D000
 
 	; Clear IF and set IE to enable vblank interrupts
 	ldh [rIF], a
@@ -187,19 +213,20 @@ ENDR
 	; Setting palettes
 	ld a, $80
 	ldh [rBCPS], a ; Auto-increment, initial address 0.
+	ld c, LOW(rBCPD)
 	; Color 00 (black chip8 pixel)
 	xor a
-	ldh [rBCPD], a
-	ldh [rBCPD], a
+	ldh [c], a
+	ldh [c], a
 	; Color 01 (white chip8 pixel)
 	ld a, $FF
-	ldh [rBCPD], a
-	ldh [rBCPD], a
+	ldh [c], a
+	ldh [c], a
 	; Color 10 (background, purple)
 	ld a, $9F
-	ldh [rBCPD], a
+	ldh [c], a
 	ld a, $4D
-	ldh [rBCPD], a
+	ldh [c], a
 
 	; Init chip8
 	MEMCPY CHIP_RAM + $200, CHIP_ROM, CHIP_ROM_END
@@ -227,9 +254,12 @@ InstrLoop:
 	ld hl, CHIP_RAM
 	add hl, de
 
-	; Storing pc + 2 back
+	; Storing pc + 2 back (masking upper byte to ensure $FFF range)
 	inc de
 	inc de
+	ld a, d
+	and $F
+	ld d, a
 	push de
 
 	; Loading chip8 instruction to DE
@@ -265,9 +295,10 @@ InstrEnd:
 	ldh [VBLANK_HIT_FLAG], a
 	CONTINUE_FRAME()
 
-InvalidInstruction:
+HandleCrash:
+InvalidInstr:
 	ld a, a
-	jr InvalidInstruction
+	jr HandleCrash
 
 ;; Instruction decoding, table for matching on first nibble
 
@@ -280,13 +311,13 @@ Case0:
 	; if first byte is not zero, instruction is invalid.
 	ld a, d
 	and a
-	jp nz, InvalidInstruction
+	jp nz, InvalidInstr
 
 	ld a, NN
 	cp $EE
 	jr z, OP_00EE
 	cp $E0
-	jp nz, InvalidInstruction
+	jp nz, InvalidInstr
 
 OP_00E0: 
 	ld a, 1
@@ -385,7 +416,7 @@ OP_4XNN:
 Case5:
 OP_5XY0:
 	LD_N();
-	jp nz, InvalidInstruction
+	jp nz, InvalidInstr
 
 	LD_VX()
 	ld b, a
@@ -420,7 +451,7 @@ Case8:
 Case9:
 OP_9XY0: 
 	LD_N()
-	jp nz, InvalidInstruction
+	jp nz, InvalidInstr
 
 	LD_VX()
 	ld b, a
@@ -449,6 +480,10 @@ OP_BNNN: ; Quirk off, jump to V[0] + NNN
 
 	LD_NNN()
 	add hl, de
+	; Mask to $FFF
+	ld a, h
+	and $F
+	ld h, a
 
 	; Updating PC
 	pop af
@@ -466,17 +501,45 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
+	LD_I_MEM_PTR()
+
 	LD_VX()
 	and CHIP_SCR_WIDTH - 1
-	ld b, a
+	ld d, a
+
+	xor a
+	ldh [VF], a
+
+	LD_N()
+	jr z, .end
+	ld b, a 
 
 	LD_VY()
 	and CHIP_SCR_HEIGHT - 1
-	ld d, a
+	ld e, a
 
-	LD_N()
-	ld e, a 
+	; (x / 4) * 2 + (y * 64)
 
+.heightLoop:
+	CHECK_MEM_OOB()
+	ld a, [hl+] ; Sprite data
+	push hl
+
+	FOR i, 7, 0, -1
+		bit i, a
+		jr z, .skip\@
+		;
+		.skip\@:
+	ENDR
+	pop hl
+	inc e
+	ld a, e
+	cp CHIP_SCR_HEIGHT
+	jr z, .end
+	dec b
+	jr nz, .heightLoop
+
+.end:
 	jp InstrEnd
 	
 CaseE: ; TODO input
@@ -490,8 +553,8 @@ CaseF:
 SECTION "8XY Jump Table", ROM0, ALIGN[8] 
 _8XYJumpTable:
 	dw _8XY0, _8XY1, _8XY2, _8XY3, _8XY4, _8XY5, _8XY6, _8XY7,
-	dw InvalidInstruction, InvalidInstruction, InvalidInstruction, InvalidInstruction,
-	dw InvalidInstruction, InvalidInstruction, _8XYE, InvalidInstruction
+	dw InvalidInstr, InvalidInstr, InvalidInstr, InvalidInstr,
+	dw InvalidInstr, InvalidInstr, _8XYE, InvalidInstr
 
 _8XY0:
 	LD_VY()
@@ -591,7 +654,7 @@ _8XY7:
 _8XYE:
 	LD_VX_PTR()
 	ldh a, [c]
-	sla a
+	add a ; Same as left shift
 	ldh [c], a
 
 	SET_VF_CARRY(1)
@@ -600,25 +663,25 @@ _8XYE:
 ; Matching on both lower nibbles of the instruction, 128 entries (byte is masked with $7F)
 SECTION "FX Jump Table", ROM0, ALIGN[8]
 FXJumpTable:
-	ds 14, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $00-$06
-    dw FX07                                          		 ; $07
-    ds 04, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $08-$09
-    dw FX0A                                          		 ; $0A
-    ds 20, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $0B-$14
-    dw FX15                                          		 ; $15
-    ds 04, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $16-$17
-    dw FX18                                          		 ; $18
-    ds 10, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $19-$1D
-    dw FX1E                                          		 ; $1E
-    ds 20, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $1F-$28
-    dw FX29                                          		 ; $29
-    ds 18, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $2A-$32
-    dw FX33                                          		 ; $33
-    ds 66, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $34-$54
-    dw FX55                                          		 ; $55
-    ds 30, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $56-$64
-    dw FX65                                          		 ; $65
-    ds 52, LOW(InvalidInstruction), HIGH(InvalidInstruction) ; $66-$7F
+	ds 14, LOW(InvalidInstr), HIGH(InvalidInstr) ; $00-$06
+    dw FX07 ; $07
+    ds 04, LOW(InvalidInstr), HIGH(InvalidInstr) ; $08-$09
+    dw FX0A ; $0A
+    ds 20, LOW(InvalidInstr), HIGH(InvalidInstr) ; $0B-$14
+    dw FX15 ; $15
+    ds 04, LOW(InvalidInstr), HIGH(InvalidInstr) ; $16-$17
+    dw FX18 ; $18
+    ds 10, LOW(InvalidInstr), HIGH(InvalidInstr) ; $19-$1D
+    dw FX1E ; $1E
+    ds 20, LOW(InvalidInstr), HIGH(InvalidInstr) ; $1F-$28
+    dw FX29 ; $29
+    ds 18, LOW(InvalidInstr), HIGH(InvalidInstr) ; $2A-$32
+    dw FX33 ; $33
+    ds 66, LOW(InvalidInstr), HIGH(InvalidInstr) ; $34-$54
+    dw FX55 ; $55
+    ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $56-$64
+    dw FX65 ; $65
+    ds 52, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$7F
 
 FX07:
 	LD_VX_PTR();
@@ -676,26 +739,9 @@ FX29:
 
 	jp InstrEnd
 
-MACRO LD_I_MEM_PTR
-	ldh a, [I_REG]
-	ld c, a
-	ldh a, [I_REG + 1]
-	ld b, a
-
-	ld hl, CHIP_RAM
-	add hl, bc
-ENDM
-
 FX33:
 	LD_I_MEM_PTR()
 	LD_VX()
-	ld d, $F
-
-MACRO MASK_I
-	ld a, h
-	and d
-	ld h, a
-ENDM
 
 	ld b, 100
 	ld c, -1
@@ -710,7 +756,7 @@ ENDM
 
 	ld a, c
 	ld [hl+], a ; Storing hundreds
-	MASK_I()
+	CHECK_MEM_OOB()
 
 	ld a, e
 	ld b, 10
@@ -726,7 +772,7 @@ ENDM
 
 	ld a, c
 	ld [hl+], a ; Storing tenths
-	MASK_I()
+	CHECK_MEM_OOB()
 
 	ld [hl], e ; Storing ones
 
@@ -734,13 +780,14 @@ ENDM
 
 MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
 	LD_X()
-	ld b, a ; Number of registers to store
-	inc b; V[x] is included
+	ld e, a ; Number of registers to store
+	inc e; V[x] is included
 
 	LD_I_MEM_PTR()
 	ld c, LOW(V0)
-	ld e, $F
 .copyLoop\@
+	CHECK_MEM_OOB()
+
 	IF \1 == 1
 		ldh a, [c]
 		ld [hl+], a
@@ -748,13 +795,9 @@ MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
 		ld a, [hl+]
 		ldh [c], a
 	ENDC
-	; Keep I withn $FFF
-	ld a, h
-	and e
-	ld h, a
 
 	inc c
-	dec b
+	dec e
 	jr nz, .copyLoop\@
 ENDM
 

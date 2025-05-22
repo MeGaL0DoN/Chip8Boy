@@ -4,9 +4,6 @@ INCLUDE "utils.asm"
 ; TO COMPILE RUN:
 ; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -C -v -p 0xFF chip8boy.gb
 
-; TODO: add FPS counter, frame counter to 60 in vblank, and count dropped frames seperately (increment if FRAME_DONE_FLAG is zero)
-; subtract dropped from 60, that is fps.
-
 MACRO LD_X
 	ld a, d
 	and $F
@@ -78,45 +75,14 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-DEF IPF EQU 250 ; Instructions per frame
+DEF IPF EQU 246 ; Instructions per frame
 DEF CHIP_RAM_SIZE EQU 4096
 DEF CHIP_RAM_DEADBUF_SIZE EQU 31
 DEF CHIP_SCR_WIDTH EQU 64
 DEF CHIP_SCR_HEIGHT EQU 32
 DEF SCREEN_BUF_SIZE EQU 2048
 
-SECTION "VBlank Handler", ROM0[$0040]
-VBlankHandler:
-	push af
-	ldh a, [FRAME_DONE_FLAG]
-	and a
-	jr z, .end ; Dont render screen if didn't finish executing opcodes for this frame yet.
-	ldh a, [CLEAR_SCREEN_FLAG]
-	and a
-	jr z, .copyScreen
-	; Will display next frame using $9C00 (blank) tilemap instead, and not do copy.
-	xor a
-	ldh [FRAME_DONE_FLAG], a
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000 | LCDCF_BG9C00
-	ldh [rLCDC], a
-	jr .end
-.copyScreen
-	ldh [FRAME_DONE_FLAG], a ; 0
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-	ldh [rLCDC], a
-	ld a, HIGH(SCREEN_BUF)
-	ldh [rHDMA1], a
-	ld a, LOW(SCREEN_BUF)
-	ldh [rHDMA2], a
-	ld a, HIGH(VRAM_SCREEN_BUF)
-	ldh [rHDMA3], a
-	ld a, LOW(VRAM_SCREEN_BUF)
-	ldh [rHDMA4], a 
-	ld a, $7F ; Bit 7 is clear for general-purpose DMA. All low bits are set for 2048 byte transfer.
-	ldh [rHDMA5], a
-.end
-	pop af
-    reti
+DEF DIGIT0_TILE_NUM EQU $82
 
 SECTION "Variables", HRAM
 CHIP_STATE:
@@ -135,17 +101,29 @@ DELAY_TIMER:
 SOUND_TIMER:
 	ds 1
 INSTR_COUNT:
-	ds 2
+	ds 1 ;2
 CLEAR_SCREEN_FLAG:
 	ds 1
 FRAME_DONE_FLAG:
 	ds 1
+FRAME_COUNTER:
+	ds 1
+DROPPED_FRAME_COUNTER:
+	ds 1
 CHIP_STATE_END:
+; Regular code temps:
 temp1:
 	ds 1
 temp2:
 	ds 1
 temp3:
+	ds 1
+; For use in interrupts:
+temp4:
+	ds 1
+temp5:
+	ds 1
+temp6:
 	ds 1
 
 SECTION "ChipRAM", WRAMX[$D000]
@@ -166,6 +144,72 @@ SCREEN_BUF:
 SECTION "VRAMScreenBuf", VRAM[$8010]
 VRAM_SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
+
+SECTION "VBlank Handler", ROM0[$0040]
+VBlankHandler:
+	push af
+	ldh a, [FRAME_DONE_FLAG]
+	and a
+	jr z, .droppedFrame  ; Dont render screen if didn't finish executing opcodes for this frame yet.
+	ldh a, [CLEAR_SCREEN_FLAG] 
+	and a
+	jr z, .copyScreen
+	; Will display next frame using $9C00 (blank) tilemap instead, and not do copy.
+	xor a
+    ldh [FRAME_DONE_FLAG], a	
+	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000 | LCDCF_BG9C00
+	ldh [rLCDC], a
+	jr .end
+.copyScreen
+	ldh [FRAME_DONE_FLAG], a ; a is 0
+	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
+	ldh [rLCDC], a
+	START_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
+.end
+	ldh a, [FRAME_COUNTER]
+	dec a
+	ldh [FRAME_COUNTER], a
+	jr z, .secondElapsed
+	pop af
+    reti
+.secondElapsed:
+	push hl
+	ld a, 60
+	ldh [FRAME_COUNTER], a
+	ld hl, DROPPED_FRAME_COUNTER
+	ld a, $60 ; BCD 60
+	sub [hl]
+	daa
+	ld [hl], 0
+	; Updating fps on both tilemaps
+	ldh [temp4], a
+	swap a
+	and $F
+	add DIGIT0_TILE_NUM
+	ld l, 0
+	ld h, $98
+	ld [hl], a
+	ld h, $9C
+	ld [hl], a
+
+	ldh a, [temp4]
+	and $F
+	add DIGIT0_TILE_NUM
+	inc l
+	ld h, $98
+	ld [hl], a
+	ld h, $9C
+	ld [hl], a
+
+	pop hl
+	pop af
+	reti 
+.droppedFrame
+	ldh a, [DROPPED_FRAME_COUNTER]
+	inc a
+	daa
+	ldh [DROPPED_FRAME_COUNTER], a
+	jr .end
 
 SECTION "Header", ROM0[$100]
 	jr EntryPoint
@@ -209,7 +253,7 @@ EntryPoint:
 	ldh [rVBK], a
 
 	; Setting bg tile (used for area outside chip8 screen) to '10'
-	ld hl, BG_TILE
+	ld hl, VRAM_BG_TILE
 	ld b, $FF
 REPT 8
 	xor a
@@ -218,11 +262,13 @@ REPT 8
 	ld [hl+], a
 ENDR
 	; Setting clear tile to '00'
-	ld hl, CLEAR_TILE
+	ld hl, VRAM_CLEAR_TILE
 	xor a
 REPT 16
 	ld [hl+], a
 ENDR
+	MEMCPY VRAM_DIGIT_TILES, DIGIT_TILES, DIGIT_TILES_END
+
 	; Setting palettes
 	ld a, $80
 	ldh [rBCPS], a ; Auto-increment, initial address 0.
@@ -235,10 +281,15 @@ ENDR
 	ld a, $FF
 	ldh [c], a
 	ldh [c], a
-	; Color 10 (background, cyan)
-	ld a, $E0
+	; Color 10 (background, light-blue)
+	ld a, $55
 	ldh [c], a
-	ld a, $7F
+	ld a, $73
+	ldh [c], a
+	; Color 11 (text, yellow)
+	ld a, $FF
+	ldh [c], a
+	ld a, $07
 	ldh [c], a
 
 	; Init chip8
@@ -252,6 +303,9 @@ ENDR
 
 	ld a, 1
 	ldh [CLEAR_SCREEN_FLAG], a
+
+	ld a, 60
+	ldh [FRAME_COUNTER], a
 
 	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
@@ -267,10 +321,13 @@ ENDR
 	ldh [rIF], a
 	ei
 
-	ld a, LOW(IPF)
-	ldh [INSTR_COUNT], a
-	ld a, HIGH(IPF)
-	ldh [INSTR_COUNT + 1], a
+	ld a, IPF ;
+	ldh [INSTR_COUNT], a ;
+
+	; ld a, LOW(IPF)
+	; ldh [INSTR_COUNT], a
+	; ld a, HIGH(IPF)
+	; ldh [INSTR_COUNT + 1], a
 
 InstrLoop:
 	; loading chip8 PC to DE
@@ -296,18 +353,19 @@ InstrLoop:
 	JP_TABLE(MainJumpTable)
 
 InstrEnd:
-	; TODO: optimize 16bit instr counting
-	ld hl, INSTR_COUNT
-	ld a, [hl+]
-	ld c, a
-	ld a, [hl-]
-	ld b, a
-	dec bc
-	ld a, c
-	ld [hl+], a
-	or b
-	ld a, b
-	ld [hl-], a
+	; ld hl, INSTR_COUNT
+	; ld a, [hl+]
+	; ld c, a
+	; ld a, [hl-]
+	; ld b, a
+	; dec bc
+	; ld a, c
+	; ld [hl+], a
+	; or b
+	; ld a, b
+	; ld [hl-], a
+	ld hl, INSTR_COUNT ;
+	dec [hl] ;
 	jr nz, InstrLoop
 	ld a, 1
 	ldh [FRAME_DONE_FLAG], a
@@ -316,9 +374,11 @@ InstrEnd:
 	sub a, 1
 	adc 0 ; Bring back to 0, if decremented to $FF
 	ldh [DELAY_TIMER], a
-	ld a, LOW(IPF)
-	ld [hl+], a
-	ld [hl], HIGH(IPF)
+	ld [hl], IPF ;
+
+	; ld a, LOW(IPF)
+	; ld [hl+], a
+	; ld [hl], HIGH(IPF)
 
 	jr InstrLoop
 
@@ -352,7 +412,7 @@ OP_00E0:
 
 	jp InstrEnd
 
-OP_00EE: ; Ret from function
+OP_00EE:
 	ldh a, [CHIP_SP]
 	; Updating SP
 	sub 2
@@ -372,7 +432,7 @@ OP_00EE: ; Ret from function
 	jp InstrEnd
 
 Case1: 
-OP_1NNN: ; Jump NNN
+OP_1NNN:
 	LD_NNN()
 	pop af
 	push de
@@ -380,7 +440,7 @@ OP_1NNN: ; Jump NNN
 	jp InstrEnd
 
 Case2:
-OP_2NNN: ; Call function
+OP_2NNN:
 	; load current PC to HL
 	pop hl
 
@@ -973,18 +1033,114 @@ FX65:
 	jp InstrEnd
 
 ; Tile $0, used for background around the 128x64 screen 
-SECTION "BGTile", VRAM[$8000]
-BG_TILE:
+SECTION "VRAMBGTile", VRAM[$8000]
+VRAM_BG_TILE:
 	ds 16
 
-; Tile $81, always has off pixel color, is used for zero tile map
-SECTION "ClearTile", VRAM[$8010 + SCREEN_BUF_SIZE]
-CLEAR_TILE:
+SECTION "VRAMTiles", VRAM[$8010 + SCREEN_BUF_SIZE]
+VRAM_CLEAR_TILE: ; Tile $81, always has off pixel color, is used for zero tile map
 	ds 16	
+VRAM_DIGIT_TILES:
+	ds 160
+
+SECTION "Tiles", ROMX
+DIGIT_TILES:
+    ; 0
+    dw `22222222
+    dw `22333322
+    dw `23322332
+    dw `23322332
+    dw `23322332
+    dw `23322332
+    dw `22333322
+    dw `22222222
+    ; 1
+    dw `22222222
+    dw `22233222
+    dw `22333222
+    dw `22233222
+    dw `22233222
+    dw `22233222
+    dw `22333322
+    dw `22222222
+    ; 2
+    dw `22222222
+    dw `22333322
+    dw `23223332
+    dw `22223332
+    dw `22333222
+    dw `23332222
+    dw `23333332
+    dw `22222222
+    ; 2
+    dw `22222222
+    dw `23333322
+    dw `22223332
+    dw `22333322
+    dw `22223332
+    dw `22223332
+    dw `23333322
+    dw `22222222
+    ; 4
+    dw `22222222
+    dw `22333322
+    dw `23323322
+    dw `23223322
+    dw `23223322
+    dw `23333332
+    dw `22223322
+    dw `22222222
+    ; 5
+    dw `22222222
+    dw `23333322
+    dw `23322222
+    dw `23333322
+    dw `22223332
+    dw `23223332
+    dw `22333322
+    dw `22222222
+    ; 6
+    dw `22222222
+    dw `22333322
+    dw `23322222
+    dw `23333322
+    dw `23322332
+    dw `23322332
+    dw `22333322
+    dw `22222222
+    ; 7
+    dw `22222222
+    dw `23333332
+    dw `22222332
+    dw `22223322
+    dw `22233222
+    dw `22333222
+    dw `22333222
+    dw `22222222
+    ; 8
+    dw `22222222
+    dw `22333322
+    dw `23222332
+    dw `22333322
+    dw `23222332
+    dw `23222332
+    dw `22333322
+    dw `22222222
+    ; 9
+    dw `22222222
+    dw `22333322
+    dw `23223332
+    dw `23223332
+    dw `22333332
+    dw `22223332
+    dw `22333322
+    dw `22222222
+DIGIT_TILES_END:
 
 SECTION "TileMap", ROMX
 TILE_MAP:
-	REPT 5
+	db DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	REPT 4
 	REPT 32
 		db 0
 	ENDR
@@ -1008,7 +1164,8 @@ TILE_MAP_END:
 
 SECTION "ZeroTileMap", ROMX
 ZERO_TILE_MAP:
-	REPT 5
+	db DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	REPT 4
 	REPT 32
 		db 0
 	ENDR
@@ -1062,124 +1219,6 @@ CHIP_ROM:
 	db 41, 115, 5, 211, 69, 242, 41, 115, 5, 211, 69, 0, 238, 0, 0, 0, 106, 20, 34,
 	db 83, 34, 3, 76, 31, 34, 83, 18, 142
 CHIP_ROM_END:
-
-; SECTION "Chip8 ROM", ROMX ; corax+ opcode test
-; CHIP_ROM:
-; 	db 18, 10, 96, 1, 0, 238, 96, 2, 18, 166, 0, 224, 104, 50, 107, 26, 164, 241,
-; 	db 216, 180, 104, 58, 164, 245, 216, 180, 104, 2, 105, 6, 106, 11, 107, 1, 101,
-;     db 42, 102, 43, 164, 181, 216, 180, 164, 237, 217, 180, 164, 165, 54, 43, 164,
-; 	db 161, 218, 180, 107, 6, 164, 185, 216, 180, 164, 237, 217, 180, 164, 161, 69,
-; 	db 42, 164, 165, 218, 180, 107, 11, 164, 189, 216, 180, 164, 237, 217, 180,
-; 	db 164, 161, 85, 96, 164, 165, 218, 180, 107, 16, 164, 197, 216, 180, 164, 237,
-; 	db 217, 180, 164, 161, 118, 255, 70, 42, 164, 165, 218, 180, 123, 5, 164, 205,
-; 	db 216, 180, 164, 237, 217, 180, 164, 161, 149, 96, 164, 165, 218, 180, 123, 5,
-; 	db 164, 173, 216, 180, 164, 237, 217, 180, 164, 165, 18, 144, 164, 161, 218,
-; 	db 180, 104, 18, 105, 22, 106, 27, 107, 1, 164, 177, 216, 180, 164, 237, 217,
-; 	db 180, 96, 0, 34, 2, 164, 165, 64, 0, 164, 161, 218, 180, 123, 5, 164, 169,
-; 	db 216, 180, 164, 225, 217, 180, 164, 165, 64, 2, 164, 161, 48, 0, 218, 180,
-; 	db 123, 5, 164, 201, 216, 180, 164, 169, 217, 180, 164, 161, 101, 42, 103, 0,
-; 	db 135, 80, 71, 42, 164, 165, 218, 180, 123, 5, 164, 201, 216, 180, 164, 173,
-; 	db 217, 180, 164, 161, 102, 11, 103, 42, 135, 97, 71, 43, 164, 165, 218, 180,
-; 	db 123, 5, 164, 201, 216, 180, 164, 177, 217, 180, 164, 161, 102, 120, 103, 31,
-; 	db 135, 98, 71, 24, 164, 165, 218, 180, 123, 5, 164, 201, 216, 180, 164, 181,
-; 	db 217, 180, 164, 161, 102, 120, 103, 31, 135, 99, 71, 103, 164, 165, 218, 180,
-; 	db 104, 34, 105, 38, 106, 43, 107, 1, 164, 201, 216, 180, 164, 185, 217, 180,
-; 	db 164, 161, 102, 140, 103, 140, 135, 100, 71, 24, 164, 165, 218, 180, 123, 5,
-; 	db 164, 201, 216, 180, 164, 189, 217, 180, 164, 161, 102, 140, 103, 120, 135,
-; 	db 101, 71, 236, 164, 165, 218, 180, 123, 5, 164, 201, 216, 180, 164, 197, 217,
-; 	db 180, 164, 161, 102, 120, 103, 140, 135, 103, 71, 236, 164, 165, 218, 180,
-; 	db 123, 5, 164, 201, 216, 180, 164, 193, 217, 180, 164, 161, 102, 15, 134, 102,
-; 	db 70, 7, 164, 165, 218, 180, 123, 5, 164, 201, 216, 180, 164, 225, 217, 180,
-; 	db 164, 161, 102, 224, 134, 110, 70, 192, 164, 165, 218, 180, 123, 5, 164, 229,
-; 	db 216, 180, 164, 193, 217, 180, 164, 158, 241, 101, 164, 165, 48, 170, 164,
-; 	db 161, 49, 85, 164, 161, 218, 180, 104, 50, 105, 54, 106, 59, 107, 1, 164,
-; 	db 229, 216, 180, 164, 189, 217, 180, 164, 158, 96, 0, 97, 48, 241, 85, 164,
-; 	db 158, 240, 101, 129, 0, 164, 159, 240, 101, 164, 165, 48, 48, 164, 161, 49,
-; 	db 0, 164, 161, 218, 180, 123, 5, 164, 229, 216, 180, 164, 181, 217, 180, 164,
-; 	db 158, 102, 137, 246, 51, 242, 101, 164, 161, 48, 1, 20, 50, 49, 3, 20, 50,
-; 	db 50, 7, 20, 50, 164, 158, 102, 65, 246, 51, 242, 101, 164, 161, 48, 0, 20,
-; 	db 50, 49, 6, 20, 50, 50, 5, 20, 50, 164, 158, 102, 4, 246, 51, 242, 101, 164,
-; 	db 161, 48, 0, 20, 50, 49, 0, 20, 50, 50, 4, 20, 50, 164, 165, 218, 180, 123,
-; 	db 5, 164, 229, 216, 180, 164, 225, 217, 180, 164, 161, 102, 4, 246, 30, 218,
-; 	db 180, 123, 5, 164, 233, 216, 180, 164, 237, 217, 180, 164, 165, 102, 255,
-; 	db 118, 10, 54, 9, 164, 161, 134, 102, 54, 4, 164, 161, 102, 255, 96, 10, 134,
-; 	db 4, 54, 9, 164, 161, 134, 102, 54, 4, 164, 161, 102, 255, 134, 110, 134, 102,
-; 	db 54, 127, 164, 161, 134, 102, 134, 110, 54, 126, 164, 161, 102, 5, 118, 246,
-; 	db 54, 251, 164, 161, 102, 5, 134, 5, 54, 251, 164, 161, 102, 5, 128, 103, 48,
-; 	db 251, 164, 161, 218, 180, 20, 156, 170, 85, 0, 0, 160, 64, 160, 0, 160, 192,
-; 	db 128, 224, 160, 160, 224, 192, 64, 64, 224, 224, 32, 192, 224, 224, 96, 32,
-; 	db 224, 160, 224, 32, 32, 224, 192, 32, 192, 96, 128, 224, 224, 224, 32, 64,
-; 	db 64, 224, 224, 160, 224, 224, 224, 32, 192, 64, 160, 224, 160, 192, 224, 160,
-; 	db 224, 224, 128, 128, 224, 192, 160, 160, 192, 224, 192, 128, 224, 224, 128,
-; 	db 192, 128, 0, 160, 160, 64, 160, 64, 160, 160, 10, 174, 162, 66, 56, 8, 48, 
-; 	db 184
-; CHIP_ROM_END:
-
-; SECTION "Chip8 ROM", ROMX ; flags test
-; CHIP_ROM:
-; 	db 18, 160, 96, 0, 224, 161, 18, 4, 112, 1, 64, 16, 0, 238, 18, 4, 252, 101,
-; 	db 34, 118, 65, 0, 0, 238, 128, 16, 34, 118, 66, 0, 0, 238, 128, 32, 34, 118,
-; 	db 67, 0, 0, 238, 128, 48, 34, 118, 68, 0, 0, 238, 128, 64, 34, 118, 69, 0, 0,
-; 	db 238, 128, 80, 34, 118, 70, 0, 0, 238, 128, 96, 34, 118, 71, 0, 0, 238, 128,
-; 	db 112, 34, 118, 72, 0, 0, 238, 128, 128, 34, 118, 73, 0, 0, 238, 128, 144, 34,
-; 	db 118, 74, 0, 0, 238, 128, 160, 34, 118, 75, 0, 0, 238, 128, 176, 34, 118, 76,
-; 	db 0, 0, 238, 128, 192, 34, 118, 0, 238, 165, 87, 240, 30, 221, 228, 125, 4, 0,
-; 	db 238, 165, 91, 142, 208, 142, 238, 142, 238, 254, 30, 218, 180, 122, 5, 0,
-; 	db 238, 165, 88, 146, 192, 165, 85, 123, 1, 218, 179, 122, 4, 123, 255, 0, 238,
-; 	db 0, 224, 106, 50, 107, 27, 166, 9, 218, 180, 106, 58, 166, 13, 218, 180, 109,
-; 	db 0, 110, 0, 165, 247, 34, 16, 106, 22, 107, 0, 97, 15, 109, 1, 34, 128, 99,
-; 	db 15, 111, 20, 131, 241, 111, 0, 98, 50, 130, 17, 142, 240, 108, 63, 34, 144,
-; 	db 130, 224, 108, 0, 34, 144, 130, 48, 108, 31, 34, 144, 122, 5, 109, 2, 34,
-; 	db 128, 99, 15, 111, 20, 131, 242, 111, 0, 98, 50, 130, 18, 142, 240, 108, 2,
-; 	db 34, 144, 130, 224, 108, 0, 34, 144, 130, 48, 108, 4, 34, 144, 123, 5, 106,
-; 	db 0, 109, 3, 34, 128, 99, 15, 111, 20, 131, 243, 111, 0, 98, 50, 130, 19, 142,
-; 	db 240, 108, 61, 34, 144, 130, 224, 108, 0, 34, 144, 130, 48, 108, 27, 34, 144,
-; 	db 122, 5, 109, 4, 34, 128, 111, 20, 143, 20, 132, 240, 99, 15, 111, 20, 131,
-; 	db 244, 111, 170, 98, 50, 130, 20, 142, 240, 108, 65, 34, 144, 130, 224, 108,
-; 	db 0, 34, 144, 130, 48, 108, 35, 34, 144, 130, 64, 108, 0, 34, 144, 122, 1,
-; 	db 109, 5, 34, 128, 111, 20, 143, 21, 132, 240, 99, 20, 111, 15, 131, 245, 101,
-; 	db 10, 111, 10, 133, 245, 133, 240, 111, 170, 98, 50, 130, 21, 53, 1, 111, 2,
-; 	db 142, 240, 108, 35, 34, 144, 130, 224, 108, 1, 34, 144, 130, 48, 108, 5, 34,
-; 	db 144, 130, 64, 108, 1, 34, 144, 123, 5, 106, 0, 109, 6, 34, 128, 111, 60,
-; 	db 143, 246, 131, 240, 111, 170, 98, 60, 130, 38, 142, 240, 108, 30, 34, 144,
-; 	db 130, 224, 108, 0, 34, 144, 130, 48, 108, 0, 34, 144, 122, 5, 109, 7, 34,
-; 	db 128, 111, 10, 143, 23, 132, 240, 99, 15, 111, 20, 131, 247, 101, 10, 111,
-; 	db 10, 133, 247, 133, 240, 111, 170, 98, 15, 97, 50, 130, 23, 53, 1, 111, 2,
-; 	db 142, 240, 108, 35, 34, 144, 130, 224, 108, 1, 34, 144, 130, 48, 108, 5, 34,
-; 	db 144, 130, 64, 108, 1, 34, 144, 122, 1, 109, 14, 34, 128, 111, 50, 143, 254,
-; 	db 131, 240, 111, 170, 98, 50, 130, 46, 142, 240, 108, 100, 34, 144, 130, 224,
-; 	db 108, 0, 34, 144, 130, 48, 108, 0, 34, 144, 109, 0, 110, 16, 165, 253, 34,
-; 	db 16, 106, 22, 107, 16, 97, 100, 109, 4, 34, 128, 111, 200, 143, 20, 132, 240,
-; 	db 99, 100, 111, 200, 131, 244, 111, 170, 98, 200, 130, 20, 142, 240, 108, 44,
-; 	db 34, 144, 130, 224, 108, 1, 34, 144, 130, 48, 108, 44, 34, 144, 130, 64, 108,
-; 	db 1, 34, 144, 122, 1, 109, 5, 34, 128, 111, 95, 143, 21, 132, 240, 99, 95,
-; 	db 111, 100, 131, 245, 111, 170, 98, 95, 130, 21, 142, 240, 108, 251, 34, 144,
-; 	db 130, 224, 108, 0, 34, 144, 130, 48, 108, 251, 34, 144, 130, 64, 108, 0, 34,
-; 	db 144, 123, 5, 106, 0, 109, 6, 34, 128, 111, 61, 143, 246, 131, 240, 111, 170,
-; 	db 98, 61, 130, 38, 142, 240, 108, 30, 34, 144, 130, 224, 108, 1, 34, 144, 130,
-; 	db 48, 108, 1, 34, 144, 122, 5, 109, 7, 34, 128, 111, 105, 143, 23, 132, 240,
-; 	db 99, 105, 111, 100, 131, 247, 111, 170, 98, 105, 130, 23, 142, 240, 108, 251,
-; 	db 34, 144, 130, 224, 108, 0, 34, 144, 130, 48, 108, 251, 34, 144, 130, 64,
-; 	db 108, 0, 34, 144, 122, 1, 109, 14, 34, 128, 111, 188, 143, 254, 131, 240,
-; 	db 111, 170, 98, 188, 130, 46, 142, 240, 108, 120, 34, 144, 130, 224, 108, 1,
-; 	db 34, 144, 130, 48, 108, 1, 34, 144, 109, 0, 110, 27, 166, 3, 34, 16, 106, 22,
-; 	db 107, 27, 109, 15, 34, 128, 122, 255, 109, 14, 34, 128, 165, 68, 97, 16, 241,
-; 	db 30, 96, 170, 240, 85, 165, 84, 240, 101, 130, 0, 108, 170, 34, 144, 165, 68,
-; 	db 111, 16, 255, 30, 96, 85, 240, 85, 165, 84, 240, 101, 130, 0, 108, 85, 34,
-; 	db 144, 21, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 160, 192,
-; 	db 128, 160, 64, 160, 224, 160, 160, 224, 192, 64, 64, 224, 224, 32, 192, 224,
-; 	db 224, 96, 32, 224, 160, 224, 32, 32, 224, 192, 32, 192, 224, 128, 224, 224,
-; 	db 224, 32, 32, 32, 224, 224, 160, 224, 224, 224, 32, 224, 64, 160, 224, 160,
-; 	db 192, 224, 160, 224, 224, 128, 128, 224, 192, 160, 160, 192, 224, 192, 128,
-; 	db 224, 224, 128, 192, 128, 96, 128, 160, 96, 160, 224, 160, 160, 224, 64, 64,
-; 	db 224, 96, 32, 32, 192, 160, 192, 160, 160, 128, 128, 128, 224, 224, 224, 160,
-; 	db 160, 192, 160, 160, 160, 224, 160, 160, 224, 192, 160, 192, 128, 64, 160,
-; 	db 224, 96, 192, 160, 192, 160, 96, 192, 32, 192, 224, 64, 64, 64, 160, 160,
-; 	db 160, 96, 160, 160, 160, 64, 160, 160, 224, 224, 160, 64, 160, 160, 160, 160,
-; 	db 64, 64, 224, 96, 128, 224, 0, 0, 0, 0, 0, 224, 0, 0, 0, 0, 0, 64, 72, 44,
-; 	db 104, 104, 140, 0, 52, 44, 112, 112, 140, 0, 100, 120, 72, 60, 112, 0, 10,
-; 	db 174, 162, 66, 56, 8, 48, 184
-; CHIP_ROM_END:
 
 ; SECTION "Chip8 ROM", ROMX ; quirks test
 ; CHIP_ROM:

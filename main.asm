@@ -75,7 +75,10 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-DEF IPF EQU 246 ; Instructions per frame
+; 66 * 4 = 264 IPF
+DEF IPF_PER_BLOCK EQU 66
+DEF IPF_BLOCKS_NUM EQU 4
+
 DEF CHIP_RAM_SIZE EQU 4096
 DEF CHIP_RAM_DEADBUF_SIZE EQU 31
 DEF CHIP_SCR_WIDTH EQU 64
@@ -100,8 +103,10 @@ DELAY_TIMER:
 	ds 1
 SOUND_TIMER:
 	ds 1
-INSTR_COUNT:
-	ds 1 ;2
+INSTR_COUNTER:
+	ds 1 
+INSTR_BLOCK_COUNTER:
+	ds 1
 CLEAR_SCREEN_FLAG:
 	ds 1
 FRAME_DONE_FLAG:
@@ -321,13 +326,10 @@ ENDR
 	ldh [rIF], a
 	ei
 
-	ld a, IPF ;
-	ldh [INSTR_COUNT], a ;
-
-	; ld a, LOW(IPF)
-	; ldh [INSTR_COUNT], a
-	; ld a, HIGH(IPF)
-	; ldh [INSTR_COUNT + 1], a
+	ld a, IPF_PER_BLOCK 
+	ldh [INSTR_COUNTER], a 
+	ld a, IPF_BLOCKS_NUM
+	ldh [INSTR_BLOCK_COUNTER], a
 
 InstrLoop:
 	; loading chip8 PC to DE
@@ -353,19 +355,12 @@ InstrLoop:
 	JP_TABLE(MainJumpTable)
 
 InstrEnd:
-	; ld hl, INSTR_COUNT
-	; ld a, [hl+]
-	; ld c, a
-	; ld a, [hl-]
-	; ld b, a
-	; dec bc
-	; ld a, c
-	; ld [hl+], a
-	; or b
-	; ld a, b
-	; ld [hl-], a
-	ld hl, INSTR_COUNT ;
-	dec [hl] ;
+	ld hl, INSTR_COUNTER 
+	dec [hl] 
+	jr nz, InstrLoop
+	ld [hl], IPF_PER_BLOCK ; Reload number of instructions per block
+	ld hl, INSTR_BLOCK_COUNTER
+	dec [hl]
 	jr nz, InstrLoop
 	ld a, 1
 	ldh [FRAME_DONE_FLAG], a
@@ -374,11 +369,7 @@ InstrEnd:
 	sub a, 1
 	adc 0 ; Bring back to 0, if decremented to $FF
 	ldh [DELAY_TIMER], a
-	ld [hl], IPF ;
-
-	; ld a, LOW(IPF)
-	; ld [hl+], a
-	; ld [hl], HIGH(IPF)
+	ld [hl], IPF_BLOCKS_NUM ; Reload number of instruction blocks (4)
 
 	jr InstrLoop
 
@@ -608,8 +599,8 @@ OP_DXYN:
 
 .heightLoop:
 	ld a, [hl+]
-	ld b, a ; storing sprite data in B
 	push hl
+	ld b, a ; storing sprite data in B
     ; ((y & 3) * 4)
 	ld a, e
 	and $3
@@ -691,6 +682,13 @@ OP_DXYN:
 		ld [hl], a
 
 		pop hl
+
+		IF i == 7
+			ld a, b
+			cp $80
+			jp z, .skipByte
+		ENDC
+
 		.skipPixel\@:
 	ENDR
 .skipByte:
@@ -712,7 +710,6 @@ OP_DXYN:
 	ldh [CLEAR_SCREEN_FLAG], a
 	pop hl
 	jp InstrEnd
-
 .height0:
 	ldh [VF], a
 	jp InstrEnd

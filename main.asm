@@ -75,8 +75,8 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-; 66 * 4 = 264 IPF
-DEF IPF_PER_BLOCK EQU 66
+; 85 * 4 = 340 IPF
+DEF IPF_PER_BLOCK EQU 85
 DEF IPF_BLOCKS_NUM EQU 4
 
 DEF CHIP_RAM_SIZE EQU 4096
@@ -115,6 +115,8 @@ FRAME_COUNTER:
 	ds 1
 DROPPED_FRAME_COUNTER:
 	ds 1
+DXYN_XOR_MASK_LOOKUP:
+	ds 4
 CHIP_STATE_END:
 ; Regular code temps:
 temp1:
@@ -142,13 +144,20 @@ SECTION "ChipRAMDeadBuf", WRAM0[$C000]
 CHIP_RAM_DEAD_BUF:
 	ds CHIP_RAM_DEADBUF_SIZE
 
-SECTION "ChipScreenBuf", WRAM0, ALIGN[4]
+SECTION "ChipScreenBuf", WRAM0, ALIGN[8]
 SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
 
 SECTION "VRAMScreenBuf", VRAM[$8010]
 VRAM_SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
+
+SECTION "DXYNLookup", ROMX, ALIGN[8]
+DXYN_BASE_ADDR_LOOKUP:
+	FOR y, CHIP_SCR_HEIGHT
+		db LOW((y / 4) * 256 + (y & 3) * 4 + SCREEN_BUF)
+		db HIGH((y / 4) * 256 + (y & 3) * 4 + SCREEN_BUF)
+	ENDR
 
 SECTION "VBlank Handler", ROM0[$0040]
 VBlankHandler:
@@ -266,12 +275,7 @@ REPT 8
 	ld a, b
 	ld [hl+], a
 ENDR
-	; Setting clear tile to '00'
-	ld hl, VRAM_CLEAR_TILE
-	xor a
-REPT 16
-	ld [hl+], a
-ENDR
+	MEMSET VRAM_CLEAR_TILE, 0, 16
 	MEMCPY VRAM_DIGIT_TILES, DIGIT_TILES, DIGIT_TILES_END
 
 	; Setting palettes
@@ -311,6 +315,15 @@ ENDR
 
 	ld a, 60
 	ldh [FRAME_COUNTER], a
+
+	ld hl, DXYN_XOR_MASK_LOOKUP
+	ld a, %11000000
+	ld [hl+], a
+	ld a, %00110000
+	ld [hl+], a
+	ld a, %00001100
+	ld [hl+], a
+	ld [hl], %00000011
 
 	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
@@ -362,14 +375,14 @@ InstrEnd:
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
 	jr nz, InstrLoop
+	ldh a, [DELAY_TIMER]
+	sub 1
+	adc 0 ; Bring back to 0, if decremented to $FF
+	ldh [DELAY_TIMER], a
+	ld [hl], IPF_BLOCKS_NUM ; Reload number of instruction blocks
 	ld a, 1
 	ldh [FRAME_DONE_FLAG], a
 	halt ; Wait for VBlank
-	ldh a, [DELAY_TIMER]
-	sub a, 1
-	adc 0 ; Bring back to 0, if decremented to $FF
-	ldh [DELAY_TIMER], a
-	ld [hl], IPF_BLOCKS_NUM ; Reload number of instruction blocks (4)
 
 	jr InstrLoop
 
@@ -392,14 +405,30 @@ Case0:
 
 	ld a, NN
 	cp $EE
-	jr z, OP_00EE
+	jp z, OP_00EE
 	cp $E0
 	jp nz, InvalidInstr
 
 OP_00E0: 
-	ld a, 1
+	ld hl, SCREEN_BUF
+	xor a
+	ld c, 8
+
+.clearBlock:
+	REPT 127
+		ld [hl+], a
+		inc l
+	ENDR
+
+	; need to use 'inc hl' instead of 'inc l', because low byte will overflow.
+	ld [hl+], a
+	inc hl
+
+	dec c
+	jp nz, .clearBlock
+
+	inc a ; will become 1
 	ldh [CLEAR_SCREEN_FLAG], a
-	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	jp InstrEnd
 
@@ -577,11 +606,168 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	LD_I_MEM_PTR()
+	; \1 - pixel bit, \2 -  1 if its last call in this y iteration, 0 if not, \3 - skip byte label.
+	MACRO DXYN_PROCESS_PIXEL 
+		ld a, d
+		IF \1 != 7
+			add (7 - \1)
+			cp CHIP_SCR_WIDTH
+			jp z, \3
+		ENDC
+		; (x / 4) * 16
+		rra
+		srl a
+		REPT 4
+			add a
+		ENDR
+		; adding to y result:
+		IF \2 == 0
+			push hl
+		ENDC
+		ld c, a
+		IF \2 == 0 ; if its the last iteration, then b (sprite data) doesn't need to be saved.
+			ld a, b
+		ENDC
+		ld b, 0
+		add hl, bc
+		IF \2 == 0
+			ld b, a
+		ENDC
 
-	LD_N()
-	jp z, .height0
-	ldh [temp1], a ; height loop counter
+		; loading xor mask from lookup table
+		ld a, d
+		IF \1 != 7
+ 			add (7 - \1)
+ 		ENDC
+		and $3
+		add LOW(DXYN_XOR_MASK_LOOKUP)
+		ld c, a
+		ldh a, [c]
+		ld c, a
+
+		; loading and saving current screen buf byte
+		ld a, [hl]
+		IF \2 == 0
+			ldh [temp2], a
+		ELSE
+			ld b, a
+		ENDC
+		; colliion detection:
+		and c
+		jr z, .noCollision\@
+		ld a, 1
+		ldh [VF], a
+	.noCollision\@:
+		; drawing:
+		IF \2 == 0
+			ldh a, [temp2]
+		ELSE
+			ld a, b
+		ENDC
+		xor c
+		ld [hl+], a
+		; second byte is at hl + 2, since framebuf is double scaled.
+		inc hl
+		ld [hl], a
+
+		IF \2 == 0
+			pop hl
+		ENDC
+	ENDM
+
+	MACRO DXYN_FINISH
+		xor a
+		ldh [CLEAR_SCREEN_FLAG], a
+		jp InstrEnd	
+	ENDM
+
+	MACRO DXYN_CHECK_LOOP
+		inc e
+		ld a, e
+		cp CHIP_SCR_HEIGHT
+		jp z, .yClip
+		ld hl, temp1
+		dec [hl]
+		pop hl
+		jp nz, \1
+
+		DXYN_FINISH()
+	ENDM
+
+	; \1 - is 1 if no loop is needed (height is 1), 0 otherwise. 
+	MACRO DXYN
+	.heightLoop\@:
+		IF \1 == 0
+			ld a, [hl+]
+			ld b, a ; storing sprite data in B
+			push hl
+		ELSE
+			ld b, [hl]
+		ENDC
+		ld h, HIGH(DXYN_BASE_ADDR_LOOKUP) ; Precomputed entries for: ((y / 4) * 256) + ((y & 3) * 4) + SCREEN_BUF
+		ld l, e
+		sla l
+		ld a, [hl+]
+		ld h, [hl]
+		ld l, a
+
+		ld a, b
+		cp $80
+		jr nz, .regularDraw\@
+		DXYN_PROCESS_PIXEL 7, 1, .skipByte\@ ; single pixel draw
+		IF \1 == 0
+			DXYN_CHECK_LOOP(.heightLoop\@)
+		ELSE
+			DXYN_FINISH()
+		ENDC		
+	.regularDraw\@:
+		bit 7, b
+		jr z, .bit6\@
+		DXYN_PROCESS_PIXEL 7, 0, .skipByte\@
+	.bit6\@:
+		bit 6, b
+		jr z, .bit5\@
+		DXYN_PROCESS_PIXEL 6, 0, .skipByte\@
+	.bit5\@:
+		bit 5, b
+		jr z, .bit4\@
+		DXYN_PROCESS_PIXEL 5, 0, .skipByte\@
+	.bit4\@:
+		bit 4, b
+		jr z, .bit3\@
+		DXYN_PROCESS_PIXEL 4, 0, .skipByte\@
+	.bit3\@:
+		bit 3, b
+		jr z, .bit2\@
+		DXYN_PROCESS_PIXEL 3, 0, .skipByte\@
+	.bit2\@:
+		bit 2, b
+		jr z, .bit1\@
+		DXYN_PROCESS_PIXEL 2, 0, .skipByte\@
+	.bit1\@:
+		bit 1, b
+		jr z, .bit0\@
+		DXYN_PROCESS_PIXEL 1, 0, .skipByte\@
+	.bit0\@:
+		bit 0, b
+		jr z, .skipByte\@
+		DXYN_PROCESS_PIXEL 0, 1, .skipByte\@
+
+		; FOR i, 7, -1, -1
+		; 	bit i, b
+		; 	jr z, .skipPixel\@
+		; 	DXYN_PROCESS_PIXEL i, i == 0, .skipByte\@
+		; .skipPixel\@:
+		; ENDR
+	.skipByte\@:
+		IF \1 == 0
+			DXYN_CHECK_LOOP(.heightLoop\@)
+		ELSE
+			DXYN_FINISH()
+		ENDC
+	ENDM
+
+	LD_I_MEM_PTR()
 
 	LD_VX()
 	and CHIP_SCR_WIDTH - 1
@@ -589,121 +775,20 @@ OP_DXYN:
 
 	LD_VY()
 	and CHIP_SCR_HEIGHT - 1
-	ld e, a
+	ld b, a
 
 	xor a
 	ldh [VF], a
 
-	; tile byte: ((y / 4) * 256) + ((y & 3) * 4) + ((x / 4) * 16)
-	; bit mask: $C0 >> ((x & 3) * 2)
-
-.heightLoop:
-	ld a, [hl+]
-	push hl
-	ld b, a ; storing sprite data in B
-    ; ((y & 3) * 4)
-	ld a, e
-	and $3
-	add a
-	add a
-	ld c, a ; saving result in C
-	; ((y / 4) * 256)
-	ld a, e
-	srl a
-	srl a
-	; multiplying 8 bit by 32 first, since 31 / 4 = 7 * 32 = 224 - fits in a byte.
-	REPT 5
-		add a
-	ENDR
-	; 3 more 16 bit adds to complete multiplication
-	ld h, 0
-	ld l, a
-	REPT 3
-		add hl, hl
-	ENDR
-	; adding both results
-	ld a, b ; saving sprite data
-	ld b, 0
-	add hl, bc
-
-	; adding base screen buf pointer
-	ld bc, SCREEN_BUF
-	add hl, bc
-	ld b, a ; restoring sprite data
-
-	FOR i, 7, -1, -1
-		bit i, b
-		jp z, .skipPixel\@
-		ld a, d
-		add (7 - i)
-		cp CHIP_SCR_WIDTH
-		jp z, .skipByte
-		; (x / 4) * 16
-		srl a
-		srl a
-		REPT 4
-			add a
-		ENDR
-		; adding to y result:
-		push hl
-		ld c, a
-		ld a, b
-		ld b, 0
-		add hl, bc
-		ld b, a
-
-		; loading $C0 >> ((x & 3) * 2) to register C, will be used as xor mask for two tile bytes.
-		ld c, $C0
-		ld a, d
-		add (7 - i)
-		and $3
-		jr z, .continue\@
-.calculateMask\@:
-		srl c
-		srl c
-		dec a
-		jr nz, .calculateMask\@
-.continue\@:
-		; first byte, saving in temp2
-		ld a, [hl]
-		ldh [temp2], a
-		; colliion detection:
-		and c
-		jr z, .noCollision\@
-		ld a, 1
-		ldh [VF], a
-.noCollision\@:
-		; drawing:
-		ldh a, [temp2]
-		xor c
-		ld [hl+], a
-		; second byte is at hl + 2, since framebuf is double scaled.
-		inc hl
-		ld [hl], a
-
-		pop hl
-
-		IF i == 7
-			ld a, b
-			cp $80
-			jp z, .skipByte
-		ENDC
-
-		.skipPixel\@:
-	ENDR
-.skipByte:
-	inc e
-	ld a, e
-	cp CHIP_SCR_HEIGHT
-	jr z, .yClip
-	ld hl, temp1
-	dec [hl]
-	pop hl
-	jp nz, .heightLoop
-
-	xor a
-	ldh [CLEAR_SCREEN_FLAG], a
-	jp InstrEnd
+	LD_N()
+	jp z, .height0
+	ld e, b ; move Y to register e instead since its no longer needed (opcode is fully processed)
+	cp 1
+	jp nz, .regularDXYN
+	DXYN(1)
+.regularDXYN:
+	ldh [temp1], a ; height loop counter
+	DXYN(0)
 
 .yClip:
 	xor a

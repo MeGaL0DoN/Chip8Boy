@@ -2,7 +2,7 @@ INCLUDE "hardware.inc"
 INCLUDE "utils.asm"
 
 ; TO COMPILE RUN:
-; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gb chip8boy.o ; rgbfix -C -v -p 0xFF chip8boy.gb
+; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gbc chip8boy.o ; rgbfix -C -v -p 0xFF chip8boy.gbc
 
 MACRO LD_X
 	ld a, d
@@ -313,6 +313,8 @@ ENDR
 	ld a, 1
 	ldh [CLEAR_SCREEN_FLAG], a
 
+	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
+
 	ld a, 60
 	ldh [FRAME_COUNTER], a
 
@@ -324,8 +326,6 @@ ENDR
 	ld a, %00001100
 	ld [hl+], a
 	ld [hl], %00000011
-
-	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
 	; Reset chip8 PC
 	ld de, $200
@@ -615,7 +615,7 @@ OP_DXYN:
 			jp z, \3
 		ENDC
 		; (x / 4) * 16
-		rra
+		srl a
 		srl a
 		REPT 4
 			add a
@@ -720,51 +720,22 @@ OP_DXYN:
 		ELSE
 			DXYN_FINISH()
 		ENDC		
-	.regularDraw\@:
-		bit 7, b
-		jr z, .bit6\@
-		DXYN_PROCESS_PIXEL 7, 0, .skipByte\@
-	.bit6\@:
-		bit 6, b
-		jr z, .bit5\@
-		DXYN_PROCESS_PIXEL 6, 0, .skipByte\@
-	.bit5\@:
-		bit 5, b
-		jr z, .bit4\@
-		DXYN_PROCESS_PIXEL 5, 0, .skipByte\@
-	.bit4\@:
-		bit 4, b
-		jr z, .bit3\@
-		DXYN_PROCESS_PIXEL 4, 0, .skipByte\@
-	.bit3\@:
-		bit 3, b
-		jr z, .bit2\@
-		DXYN_PROCESS_PIXEL 3, 0, .skipByte\@
-	.bit2\@:
-		bit 2, b
-		jr z, .bit1\@
-		DXYN_PROCESS_PIXEL 2, 0, .skipByte\@
-	.bit1\@:
-		bit 1, b
-		jr z, .bit0\@
-		DXYN_PROCESS_PIXEL 1, 0, .skipByte\@
-	.bit0\@:
-		bit 0, b
-		jr z, .skipByte\@
-		DXYN_PROCESS_PIXEL 0, 1, .skipByte\@
 
-		; FOR i, 7, -1, -1
-		; 	bit i, b
-		; 	jr z, .skipPixel\@
-		; 	DXYN_PROCESS_PIXEL i, i == 0, .skipByte\@
-		; .skipPixel\@:
-		; ENDR
-	.skipByte\@:
-		IF \1 == 0
-			DXYN_CHECK_LOOP(.heightLoop\@)
-		ELSE
-			DXYN_FINISH()
-		ENDC
+	.regularDraw\@:
+    	REDEF skipByteLabel EQUS ".skipByte\@"
+    	FOR i, 7, -1, -1
+       		bit i, b
+        	jp z, .skipPixel\@
+        	DXYN_PROCESS_PIXEL i, i == 0, {skipByteLabel}
+    	.skipPixel\@:
+    	ENDR
+
+ 	{skipByteLabel}:
+    	IF \1 == 0
+        	DXYN_CHECK_LOOP(.heightLoop\@)
+    	ELSE
+        	DXYN_FINISH()
+    	ENDC
 	ENDM
 
 	LD_I_MEM_PTR()
@@ -782,7 +753,7 @@ OP_DXYN:
 
 	LD_N()
 	jp z, .height0
-	ld e, b ; move Y to register e instead since its no longer needed (opcode is fully processed)
+	ld e, b ; move Y to e instead
 	cp 1
 	jp nz, .regularDXYN
 	DXYN(1)

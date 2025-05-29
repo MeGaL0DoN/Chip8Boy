@@ -47,14 +47,12 @@ MACRO LD_N
 	and $F
 ENDM
 
-MACRO LD_I_MEM_PTR
+MACRO LD_I_MEM_PTR ; \1 - high register, \2 - low register
 	ldh a, [I_REG]
-	ld c, a
+	ld \2, a
 	ldh a, [I_REG + 1]
-	ld b, a
-
-	ld hl, CHIP_RAM
-	add hl, bc
+	add HIGH(CHIP_RAM)
+	ld \1, a
 ENDM
 
 MACRO CHECK_MEM_WRITE_OOB
@@ -75,8 +73,8 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-; 85 * 4 = 340 IPF
-DEF IPF_PER_BLOCK EQU 85
+; 90 * 4 = 360 IPF
+DEF IPF_PER_BLOCK EQU 90
 DEF IPF_BLOCKS_NUM EQU 4
 
 DEF CHIP_RAM_SIZE EQU 4096
@@ -154,9 +152,9 @@ VRAM_SCREEN_BUF:
 
 SECTION "DXYNLookup", ROMX, ALIGN[8]
 DXYN_BASE_ADDR_LOOKUP:
-	FOR y, CHIP_SCR_HEIGHT
-		db LOW((y / 4) * 256 + (y & 3) * 4 + SCREEN_BUF)
-		db HIGH((y / 4) * 256 + (y & 3) * 4 + SCREEN_BUF)
+	FOR x, CHIP_SCR_WIDTH
+		db LOW((x / 4) * 128 + SCREEN_BUF)
+		db HIGH((x / 4) * 128 + SCREEN_BUF)
 	ENDR
 
 SECTION "VBlank Handler", ROM0[$0040]
@@ -313,7 +311,7 @@ ENDR
 	ld a, 1
 	ldh [CLEAR_SCREEN_FLAG], a
 
-	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
+	ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
 	ld a, 60
 	ldh [FRAME_COUNTER], a
@@ -606,72 +604,35 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	; \1 - pixel bit, \2 -  1 if its last call in this y iteration, 0 if not, \3 - skip byte label.
+	; \1 - pixel bit, \2 -  1 if it's  the last call in this dxyn, 0 if not.
 	MACRO DXYN_PROCESS_PIXEL 
-		ld a, d
-		IF \1 != 7
-			add (7 - \1)
-			cp CHIP_SCR_WIDTH
-			jp z, \3
+		IF \1 == 7
+			ld a, d ; X
+			and $3
 		ENDC
-		; (x / 4) * 16
-		srl a
-		srl a
-		REPT 4
-			add a
-		ENDR
-		; adding to y result:
-		IF \2 == 0
-			push hl
-		ENDC
-		ld c, a
-		IF \2 == 0 ; if its the last iteration, then b (sprite data) doesn't need to be saved.
-			ld a, b
-		ENDC
-		ld b, 0
-		add hl, bc
-		IF \2 == 0
-			ld b, a
-		ENDC
-
-		; loading xor mask from lookup table
-		ld a, d
-		IF \1 != 7
- 			add (7 - \1)
- 		ENDC
-		and $3
 		add LOW(DXYN_XOR_MASK_LOOKUP)
 		ld c, a
 		ldh a, [c]
-		ld c, a
+		ld b, a ; saving mask in 'b'
 
-		; loading and saving current screen buf byte
+		; loading and saving current screen buf byte in c
 		ld a, [hl]
-		IF \2 == 0
-			ldh [temp2], a
-		ELSE
-			ld b, a
-		ENDC
-		; colliion detection:
-		and c
+		ld c, a
+		; collision detection:
+		and b
 		jr z, .noCollision\@
 		ld a, 1
 		ldh [VF], a
 	.noCollision\@:
 		; drawing:
-		IF \2 == 0
-			ldh a, [temp2]
-		ELSE
-			ld a, b
-		ENDC
-		xor c
+		ld a, c
+		xor b
 		ld [hl+], a
 		; second byte is at hl + 2, since framebuf is double scaled.
-		inc hl
-		ld [hl], a
-
+		inc l
+		ld [hl-], a
 		IF \2 == 0
-			pop hl
+			dec l
 		ENDC
 	ENDM
 
@@ -682,13 +643,18 @@ OP_DXYN:
 	ENDM
 
 	MACRO DXYN_CHECK_LOOP
-		inc e
-		ld a, e
+		pop bc
+		ldh a, [temp2] ; Y
+		inc a
 		cp CHIP_SCR_HEIGHT
 		jp z, .yClip
-		ld hl, temp1
-		dec [hl]
-		pop hl
+		ldh [temp2], a
+		REPT 4
+			inc l ; updating screen buf pointer
+		ENDR
+		ldh a, [temp1] ; height counter
+		dec a
+		ldh [temp1], a
 		jp nz, \1
 
 		DXYN_FINISH()
@@ -697,40 +663,46 @@ OP_DXYN:
 	; \1 - is 1 if no loop is needed (height is 1), 0 otherwise. 
 	MACRO DXYN
 	.heightLoop\@:
+		ld a, [bc]
 		IF \1 == 0
-			ld a, [hl+]
-			ld b, a ; storing sprite data in B
-			push hl
-		ELSE
-			ld b, [hl]
+			inc bc
+			push bc
 		ENDC
-		ld h, HIGH(DXYN_BASE_ADDR_LOOKUP) ; Precomputed entries for: ((y / 4) * 256) + ((y & 3) * 4) + SCREEN_BUF
-		ld l, e
-		sla l
-		ld a, [hl+]
-		ld h, [hl]
-		ld l, a
 
-		ld a, b
 		cp $80
 		jr nz, .regularDraw\@
-		DXYN_PROCESS_PIXEL 7, 1, .skipByte\@ ; single pixel draw
+		DXYN_PROCESS_PIXEL 7, \1 ; single pixel draw
 		IF \1 == 0
 			DXYN_CHECK_LOOP(.heightLoop\@)
 		ELSE
 			DXYN_FINISH()
 		ENDC		
 
+    REDEF xClipLabel EQUS ".xClip\@"
+
 	.regularDraw\@:
-    	REDEF skipByteLabel EQUS ".skipByte\@"
+		ld e, a
+		push hl
     	FOR i, 7, -1, -1
-       		bit i, b
-        	jp z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL i, i == 0, {skipByteLabel}
+			IF i != 7
+				ld a, d
+				add (7 - i)
+				cp CHIP_SCR_WIDTH
+				jp z, xClipLabel
+				and $3
+				jr nz, .noOffset\@
+				ld bc, 128
+				add hl, bc
+			ENDC
+		.noOffset\@:
+       		bit i, e
+        	jr z, .skipPixel\@
+        	DXYN_PROCESS_PIXEL i, i == 0
     	.skipPixel\@:
     	ENDR
 
- 	{skipByteLabel}:
+ 	{xClipLabel}:
+		pop hl
     	IF \1 == 0
         	DXYN_CHECK_LOOP(.heightLoop\@)
     	ELSE
@@ -738,22 +710,36 @@ OP_DXYN:
     	ENDC
 	ENDM
 
-	LD_I_MEM_PTR()
-
 	LD_VX()
 	and CHIP_SCR_WIDTH - 1
 	ld d, a
 
+	; precomputed entries for: (x / 4) * 128 + SCREEN_BUF
+	ld h, HIGH(DXYN_BASE_ADDR_LOOKUP)
+	add a ; x * 2 (each entry is 2 bytes)
+	ld l, a
+	ld a, [hl+]
+	ld h, [hl]
+	ld l, a
+
 	LD_VY()
 	and CHIP_SCR_HEIGHT - 1
-	ld b, a
+	ldh [temp2], a
+
+	; adding y * 4 to initial screen buf address
+	add a
+	add a
+	add l
+	ld l, a
+
+	; loading sprite addr to bc
+	LD_I_MEM_PTR b, c
 
 	xor a
 	ldh [VF], a
 
 	LD_N()
 	jp z, .height0
-	ld e, b ; move Y to e instead
 	cp 1
 	jp nz, .regularDXYN
 	DXYN(1)
@@ -764,7 +750,6 @@ OP_DXYN:
 .yClip:
 	xor a
 	ldh [CLEAR_SCREEN_FLAG], a
-	pop hl
 	jp InstrEnd
 .height0:
 	ldh [VF], a
@@ -1008,7 +993,7 @@ FX29:
 	jp InstrEnd
 
 FX33:
-	LD_I_MEM_PTR()
+	LD_I_MEM_PTR h, l
 	LD_VX()
 
 	ld b, 100
@@ -1051,7 +1036,7 @@ MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
 	ld e, a ; Number of registers to store
 	inc e; V[x] is included
 
-	LD_I_MEM_PTR()
+	LD_I_MEM_PTR h, l
 	ld c, LOW(V0)
 .copyLoop\@
 	IF \1 == 1
@@ -1199,14 +1184,14 @@ TILE_MAP:
 	ENDR
 	ENDR
 
-	db 0,0, $01,$02,$03,$04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $41,$42,$43,$44,$45,$46,$47,$48,$49,$4A,$4B,$4C,$4D,$4E,$4F,$50, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $61,$62,$63,$64,$65,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6E,$6F,$70, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7F,$80, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $01,$09,$11,$19,$21,$29,$31,$39,$41,$49,$51,$59,$61,$69,$71,$79, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $02,$0A,$12,$1A,$22,$2A,$32,$3A,$42,$4A,$52,$5A,$62,$6A,$72,$7A, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $03,$0B,$13,$1B,$23,$2B,$33,$3B,$43,$4B,$53,$5B,$63,$6B,$73,$7B, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $04,$0C,$14,$1C,$24,$2C,$34,$3C,$44,$4C,$54,$5C,$64,$6C,$74,$7C, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $05,$0D,$15,$1D,$25,$2D,$35,$3D,$45,$4D,$55,$5D,$65,$6D,$75,$7D, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $06,$0E,$16,$1E,$26,$2E,$36,$3E,$46,$4E,$56,$5E,$66,$6E,$76,$7E, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $07,$0F,$17,$1F,$27,$2F,$37,$3F,$47,$4F,$57,$5F,$67,$6F,$77,$7F, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db 0,0, $08,$10,$18,$20,$28,$30,$38,$40,$48,$50,$58,$60,$68,$70,$78,$80, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
 	REPT 5
 	REPT 32

@@ -14,23 +14,35 @@ MACRO LD_Y
 	swap a
 ENDM
 
-MACRO LD_VX_PTR
+MACRO LD_VX_PTR_HL
+	LD_X()
+	ld h, HIGH(V0)
+	add LOW(V0)
+	ld l, a
+ENDM
+MACRO LD_VX_PTR_C
 	LD_X()
 	add LOW(V0)
 	ld c, a
 ENDM
-MACRO LD_VY_PTR
+MACRO LD_VY_PTR_HL
+	LD_Y()
+	ld h, HIGH(V0)
+	add LOW(V0)
+	ld l, a
+ENDM
+MACRO LD_VY_PTR_C
 	LD_Y()
 	add LOW(V0)
 	ld c, a
 ENDM
 
 MACRO LD_VX
-	LD_VX_PTR()
+	LD_VX_PTR_C()
 	ldh a, [c]
 ENDM
 MACRO LD_VY
-	LD_VY_PTR()
+	LD_VY_PTR_C()
 	ldh a, [c]
 ENDM
 
@@ -47,7 +59,8 @@ MACRO LD_N
 	and $F
 ENDM
 
-MACRO LD_I_MEM_PTR ; \1 - high register, \2 - low register
+; \1 - high register, \2 - low register
+MACRO LD_I_MEM_PTR 
 	ldh a, [I_REG]
 	ld \2, a
 	ldh a, [I_REG + 1]
@@ -61,7 +74,7 @@ MACRO CHECK_MEM_WRITE_OOB
 	jp z, InstrEnd
 ENDM
 
-; First parameter is table address, 256 byte aligned! Index is stored in A.
+; \1 is table address, 256 byte aligned! Index is passed in A.
 MACRO JP_TABLE ; 
 	add a ; addresses are 2 bytes, so multiply by 2
 	ld h, HIGH(\1)
@@ -73,8 +86,8 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-; 90 * 4 = 360 IPF
-DEF IPF_PER_BLOCK EQU 90
+; 89 * 4 = 356 IPF
+DEF IPF_PER_BLOCK EQU 89
 DEF IPF_BLOCKS_NUM EQU 4
 
 DEF CHIP_RAM_SIZE EQU 4096
@@ -311,7 +324,7 @@ ENDR
 	ld a, 1
 	ldh [CLEAR_SCREEN_FLAG], a
 
-	ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
+	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
 	ld a, 60
 	ldh [FRAME_COUNTER], a
@@ -520,27 +533,24 @@ OP_5XY0:
 	LD_N();
 	jp nz, InvalidInstr
 
+	LD_VY_PTR_HL()
 	LD_VX()
-	ld b, a
-	LD_VY()
 
-	cp b
+	cp [hl]
 	COND_PC_ADD(1)
 
 	jp InstrEnd
 
 Case6:
 OP_6XNN:
-	LD_VX_PTR()
-	ld a, NN
-	ldh [c], a
+	LD_VX_PTR_HL()
+	ld [hl], NN
 
 	jp InstrEnd
 
 Case7:
 OP_7XNN:
-	LD_VX_PTR()
-	ldh a, [c]
+	LD_VX()
 	add NN
 	ldh [c], a
 
@@ -555,11 +565,10 @@ OP_9XY0:
 	LD_N()
 	jp nz, InvalidInstr
 
+	LD_VY_PTR_HL()
 	LD_VX()
-	ld b, a
 
-	LD_VY()
-	cp b
+	cp [hl]
 	COND_PC_ADD(0)
 
 	jp InstrEnd
@@ -576,8 +585,8 @@ OP_ANNN:
 	
 CaseB:
 OP_BNNN: ; Quirk off, jump to V[0] + NNN
-	ld h, 0
 	ldh a, [V0]
+	ld h, 0
 	ld l, a
 
 	LD_NNN()
@@ -595,7 +604,7 @@ OP_BNNN: ; Quirk off, jump to V[0] + NNN
 
 CaseC:
 OP_CXNN:
-	LD_VX_PTR()
+	LD_VX_PTR_C()
 	ldh a, [rDIV] ; Use timer register as rng for now.
 	and NN
 	ldh [c], a
@@ -785,21 +794,16 @@ _8XYJumpTable:
 	dw InvalidInstr, InvalidInstr, _8XYE, InvalidInstr
 
 _8XY0:
+	LD_VX_PTR_HL()
 	LD_VY()
-	ld b, a
-
-	LD_VX_PTR()
-	ld a, b
-	ldh [c], a
+	ld [hl], a
 
 	jp InstrEnd
 _8XY1:
-	LD_VY()
-	ld b, a
+	LD_VY_PTR_HL()
+	LD_VX()
 
-	LD_VX_PTR()
-	ldh a, [c]
-	or b
+	or [hl]
 	ldh [c], a
 
 	; vF reset quirk
@@ -808,12 +812,10 @@ _8XY1:
 
 	jp InstrEnd
 _8XY2:
-	LD_VY()
-	ld b, a
+	LD_VY_PTR_HL()
+	LD_VX()
 
-	LD_VX_PTR()
-	ldh a, [c]
-	and b
+	and [hl]
 	ldh [c], a
 
 	; vF reset quirk
@@ -822,12 +824,10 @@ _8XY2:
 
 	jp InstrEnd
 _8XY3:
-	LD_VY()
-	ld b, a
+	LD_VY_PTR_HL()
+	LD_VX()
 
-	LD_VX_PTR()
-	ldh a, [c]
-	xor b
+	xor [hl]
 	ldh [c], a
 
 	; vF reset quirk
@@ -849,61 +849,47 @@ MACRO SET_VF_CARRY
 ENDM
 
 _8XY4:
-	LD_VY()
-	ld b, a
+	LD_VY_PTR_HL()
+	LD_VX()
 
-	LD_VX_PTR()
-	ldh a, [c]
-	add b
+	add [hl]
 	ldh [c], a
 
 	SET_VF_CARRY(1)
 	jp InstrEnd
 _8XY5:
-	LD_VY()
-	ld b, a
+	LD_VY_PTR_HL()
+	LD_VX()
 
-	LD_VX_PTR()
-	ldh a, [c]
-	sub b
+	sub [hl]
 	ldh [c], a
 
 	SET_VF_CARRY(0)
 	jp InstrEnd
 _8XY6:
 	; shifting quirk
+	LD_VX_PTR_HL()
 	LD_VY()
-	ld b, a
-
-	LD_VX_PTR()
-	ld a, b
-	srl a
-	ldh [c], a
+	rra ; carry should be clear after LD_VY
+	ld [hl], a
 
 	SET_VF_CARRY(1)
 	jp InstrEnd
 _8XY7:
+	LD_VX_PTR_HL()
 	LD_VY()
-	ld b, a
 
-	LD_VX_PTR()
-	ldh a, [c]
-	ld l, a
-	ld a, b
-	sub l
-	ldh [c], a
+	sub [hl]
+	ld [hl], a
 
 	SET_VF_CARRY(0)
 	jp InstrEnd
 _8XYE:
 	; shifting quirk
+	LD_VX_PTR_HL()
 	LD_VY()
-	ld b, a
-
-	LD_VX_PTR()
-	ld a, b
 	add a ; Same as left shift
-	ldh [c], a
+	ld [hl], a
 
 	SET_VF_CARRY(1)
 	jp InstrEnd
@@ -932,7 +918,7 @@ FXJumpTable:
     ds 52, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$7F
 
 FX07:
-	LD_VX_PTR();
+	LD_VX_PTR_C()
 	ldh a, [DELAY_TIMER]
 	ldh [c], a
 
@@ -959,13 +945,12 @@ FX18:
 	jp InstrEnd
 
 FX1E:
-	LD_VX()
-	ld b, a
+	LD_VX_PTR_HL()
 	ld c, LOW(I_REG)
 
 	; Store low
 	ldh a, [c]
-	add b
+	add [hl]
 	ldh [c], a
 
 	; Store high
@@ -979,12 +964,12 @@ FX1E:
 FX29:
 	LD_VX()
 	and $F
-	ld b, a
+	ld c, a
 
 	; Multiply by 5
 	add a
 	add a
-	add b
+	add c
 
 	ldh [I_REG], a
 	xor a
@@ -1005,13 +990,13 @@ FX33:
 	jr nc, .countHundreds
 
 	add b
-	ld e, a
+	ld b, a
 
 	ld a, c
 	ld [hl+], a ; Storing hundreds
 	CHECK_MEM_WRITE_OOB()
 
-	ld a, e
+	ld a, b
 	ld b, 10
 	ld c, -1
 
@@ -1021,13 +1006,13 @@ FX33:
 	jr nc, .countTenths
 
 	add b
-	ld e, a
+	ld b, a
 
 	ld a, c
 	ld [hl+], a ; Storing tenths
 	CHECK_MEM_WRITE_OOB()
 
-	ld [hl], e ; Storing ones
+	ld [hl], b ; Storing ones
 
 	jp InstrEnd
 

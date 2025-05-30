@@ -86,17 +86,27 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-; 89 * 4 = 356 IPF
-DEF IPF_PER_BLOCK EQU 89
+DEF INITIAL_IPF_PER_BLOCK EQU 88
 DEF IPF_BLOCKS_NUM EQU 4
+DEF INITIAL_IPF EQU IPF_BLOCKS_NUM * INITIAL_IPF_PER_BLOCK ; 88 * 4 = 352
 
 DEF CHIP_RAM_SIZE EQU 4096
 DEF CHIP_RAM_DEADBUF_SIZE EQU 31
 DEF CHIP_SCR_WIDTH EQU 64
 DEF CHIP_SCR_HEIGHT EQU 32
+DEF SCHIP_SCR_WIDTH EQU 128
+DEF SCHIP_SCR_HEIGHT EQU 64
 DEF SCREEN_BUF_SIZE EQU 2048
 
 DEF DIGIT0_TILE_NUM EQU $82
+DEF F_TILE_NUM EQU DIGIT0_TILE_NUM + 10
+DEF P_TILE_NUM EQU DIGIT0_TILE_NUM + 11
+DEF S_TILE_NUM EQU DIGIT0_TILE_NUM + 12
+DEF I_TILE_NUM EQU DIGIT0_TILE_NUM + 13
+DEF COL_TILE_NUM EQU DIGIT0_TILE_NUM + 14
+
+DEF FPS_DIGIT0_TILEMAP_NUM EQU 4
+DEF IPF_DIGIT0_TILEMAP_NUM EQU 17
 
 SECTION "Variables", HRAM
 CHIP_STATE:
@@ -118,7 +128,11 @@ INSTR_COUNTER:
 	ds 1 
 INSTR_BLOCK_COUNTER:
 	ds 1
-CLEAR_SCREEN_FLAG:
+IPF_PER_BLOCK:
+	ds 1
+IPF_DISPLAY:
+	ds 2
+DRAW_FLAG:
 	ds 1
 FRAME_DONE_FLAG:
 	ds 1
@@ -175,22 +189,16 @@ VBlankHandler:
 	push af
 	ldh a, [FRAME_DONE_FLAG]
 	and a
-	jr z, .droppedFrame  ; Dont render screen if didn't finish executing opcodes for this frame yet.
-	ldh a, [CLEAR_SCREEN_FLAG] 
+	jr z, .droppedFrame  ; if didn't finish executing opcodes for this frame yet.
+	ldh a, [DRAW_FLAG] 
 	and a
-	jr z, .copyScreen
-	; Will display next frame using $9C00 (blank) tilemap instead, and not do copy.
+	jr z, .end
 	xor a
-    ldh [FRAME_DONE_FLAG], a	
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000 | LCDCF_BG9C00
-	ldh [rLCDC], a
-	jr .end
-.copyScreen
-	ldh [FRAME_DONE_FLAG], a ; a is 0
-	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-	ldh [rLCDC], a
+	ldh [DRAW_FLAG], a
 	START_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
 .end
+	xor a
+	ldh [FRAME_DONE_FLAG], a
 	ldh a, [FRAME_COUNTER]
 	dec a
 	ldh [FRAME_COUNTER], a
@@ -206,24 +214,17 @@ VBlankHandler:
 	sub [hl]
 	daa
 	ld [hl], 0
-	; Updating fps on both tilemaps
+	; Updating fps
 	ldh [temp4], a
 	swap a
 	and $F
 	add DIGIT0_TILE_NUM
-	ld l, 0
-	ld h, $98
-	ld [hl], a
-	ld h, $9C
-	ld [hl], a
+	ld hl, ($98 << 8) | FPS_DIGIT0_TILEMAP_NUM
+	ld [hl+], a
 
 	ldh a, [temp4]
 	and $F
 	add DIGIT0_TILE_NUM
-	inc l
-	ld h, $98
-	ld [hl], a
-	ld h, $9C
 	ld [hl], a
 
 	pop hl
@@ -264,15 +265,13 @@ EntryPoint:
 	ldh [rLCDC], a
 
 	MEMCPY $9800, TILE_MAP, TILE_MAP_END
-	MEMCPY $9C00, ZERO_TILE_MAP, ZERO_TILE_MAP_END
 	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	set 0, a
 	ldh [rVBK], a
 
-	; Set attribute maps to zeroes (use palette 0 and tile bank 0, no flips)
+	; Set attribute map to zero (use palette 0 and tile bank 0, no flips)
 	MEMSET $9800, 0, $400
-	MEMSET $9C00, 0, $400
 
 	xor a
 	ldh [rVBK], a
@@ -287,7 +286,28 @@ REPT 8
 	ld [hl+], a
 ENDR
 	MEMSET VRAM_CLEAR_TILE, 0, 16
-	MEMCPY VRAM_DIGIT_TILES, DIGIT_TILES, DIGIT_TILES_END
+
+	ld hl, VRAM_FONT_TILES
+	ld de, FONT_TILES
+	ld bc, FONT_TILES_END - FONT_TILES
+.tileCopyLoop:
+	ld a, [de]
+	inc de
+	ld [hl+], a
+	ld a, $FF
+	ld [hl+], a
+	dec bc
+	ld a, b
+	or c
+	jr nz, .tileCopyLoop
+
+	; Setting initial IPF digits on the tilemap.
+	ld hl, ($98 << 8) + IPF_DIGIT0_TILEMAP_NUM
+	ld a, DIGIT0_TILE_NUM + (INITIAL_IPF / 100)
+	ld [hl+], a
+	ld a, DIGIT0_TILE_NUM + ((INITIAL_IPF / 10) % 10)
+	ld [hl+], a
+	ld [hl], DIGIT0_TILE_NUM + (INITIAL_IPF % 10)
 
 	; Setting palettes
 	ld a, $80
@@ -321,9 +341,7 @@ ENDR
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
 	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
-	ld a, 1
-	ldh [CLEAR_SCREEN_FLAG], a
-
+	; ld a, 1
 	; ld [CHIP_RAM + $1FF], a ; writing 1 to $1FF for quirks test to enter chip8 menu by itself.
 
 	ld a, 60
@@ -342,6 +360,18 @@ ENDR
 	ld de, $200
 	push de
 
+	; Setting IPF variables
+	ld a, INITIAL_IPF_PER_BLOCK
+	ldh [IPF_PER_BLOCK], a
+	ldh [INSTR_COUNTER], a 
+	ld a, IPF_BLOCKS_NUM
+	ldh [INSTR_BLOCK_COUNTER], a
+
+	ld hl, IPF_DISPLAY
+	ld a, (INITIAL_IPF % 10) | (((INITIAL_IPF / 10) % 10) << 4)
+	ld [hl+], a
+	ld [hl], INITIAL_IPF / 100
+
 	; Turn LCD back on.
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
 	ldh [rLCDC], a
@@ -349,11 +379,6 @@ ENDR
 	xor a
 	ldh [rIF], a
 	ei
-
-	ld a, IPF_PER_BLOCK 
-	ldh [INSTR_COUNTER], a 
-	ld a, IPF_BLOCKS_NUM
-	ldh [INSTR_BLOCK_COUNTER], a
 
 InstrLoop:
 	; loading chip8 PC to DE
@@ -382,7 +407,8 @@ InstrEnd:
 	ld hl, INSTR_COUNTER 
 	dec [hl] 
 	jr nz, InstrLoop
-	ld [hl], IPF_PER_BLOCK ; Reload number of instructions per block
+	ldh a, [IPF_PER_BLOCK]
+	ld [hl], a ; Reload number of instructions per block
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
 	jr nz, InstrLoop
@@ -439,7 +465,7 @@ OP_00E0:
 	jp nz, .clearBlock
 
 	inc a ; will become 1
-	ldh [CLEAR_SCREEN_FLAG], a
+	ldh [DRAW_FLAG], a
 
 	jp InstrEnd
 
@@ -646,8 +672,8 @@ OP_DXYN:
 	ENDM
 
 	MACRO DXYN_FINISH
-		xor a
-		ldh [CLEAR_SCREEN_FLAG], a
+		ld a, 1
+		ldh [DRAW_FLAG], a
 		jp InstrEnd	
 	ENDM
 
@@ -656,7 +682,7 @@ OP_DXYN:
 		ldh a, [temp2] ; Y
 		inc a
 		cp CHIP_SCR_HEIGHT
-		jp z, .yClip
+		jr z, .yClip\@
 		ldh [temp2], a
 		REPT 4
 			inc l ; updating screen buf pointer
@@ -666,6 +692,7 @@ OP_DXYN:
 		ldh [temp1], a
 		jp nz, \1
 
+.yClip\@:
 		DXYN_FINISH()
 	ENDM
 
@@ -748,21 +775,13 @@ OP_DXYN:
 	ldh [VF], a
 
 	LD_N()
-	jp z, .height0
+	jp z, InstrEnd
 	cp 1
 	jp nz, .regularDXYN
 	DXYN(1)
 .regularDXYN:
 	ldh [temp1], a ; height loop counter
 	DXYN(0)
-
-.yClip:
-	xor a
-	ldh [CLEAR_SCREEN_FLAG], a
-	jp InstrEnd
-.height0:
-	ldh [VF], a
-	jp InstrEnd
 	
 CaseE: ; TODO input
 	ld a, NN
@@ -1063,106 +1082,34 @@ VRAM_BG_TILE:
 SECTION "VRAMTiles", VRAM[$8010 + SCREEN_BUF_SIZE]
 VRAM_CLEAR_TILE: ; Tile $81, always has off pixel color, is used for zero tile map
 	ds 16	
-VRAM_DIGIT_TILES:
+VRAM_FONT_TILES:
 	ds 160
 
 SECTION "Tiles", ROMX
-DIGIT_TILES:
-    ; 0
-    dw `22222222
-    dw `22333322
-    dw `23322332
-    dw `23322332
-    dw `23322332
-    dw `23322332
-    dw `22333322
-    dw `22222222
-    ; 1
-    dw `22222222
-    dw `22233222
-    dw `22333222
-    dw `22233222
-    dw `22233222
-    dw `22233222
-    dw `22333322
-    dw `22222222
-    ; 2
-    dw `22222222
-    dw `22333322
-    dw `23223332
-    dw `22223332
-    dw `22333222
-    dw `23332222
-    dw `23333332
-    dw `22222222
-    ; 2
-    dw `22222222
-    dw `23333322
-    dw `22223332
-    dw `22333322
-    dw `22223332
-    dw `22223332
-    dw `23333322
-    dw `22222222
-    ; 4
-    dw `22222222
-    dw `22333322
-    dw `23323322
-    dw `23223322
-    dw `23223322
-    dw `23333332
-    dw `22223322
-    dw `22222222
-    ; 5
-    dw `22222222
-    dw `23333322
-    dw `23322222
-    dw `23333322
-    dw `22223332
-    dw `23223332
-    dw `22333322
-    dw `22222222
-    ; 6
-    dw `22222222
-    dw `22333322
-    dw `23322222
-    dw `23333322
-    dw `23322332
-    dw `23322332
-    dw `22333322
-    dw `22222222
-    ; 7
-    dw `22222222
-    dw `23333332
-    dw `22222332
-    dw `22223322
-    dw `22233222
-    dw `22333222
-    dw `22333222
-    dw `22222222
-    ; 8
-    dw `22222222
-    dw `22333322
-    dw `23222332
-    dw `22333322
-    dw `23222332
-    dw `23222332
-    dw `22333322
-    dw `22222222
-    ; 9
-    dw `22222222
-    dw `22333322
-    dw `23223332
-    dw `23223332
-    dw `22333332
-    dw `22223332
-    dw `22333322
-    dw `22222222
-DIGIT_TILES_END:
+FONT_TILES:
+	db 124, 198, 206, 222, 246, 230, 124, 0 ; 0
+	db 48, 112, 48, 48, 48, 48, 252, 0 		; 1
+	db 120, 204, 12, 56, 96, 204, 252, 0	; 2
+	db 120, 204, 12, 56, 12, 204, 120, 0	; 3
+	db 28, 60, 108, 204, 254, 12, 30, 0		; 4
+	db 252, 192, 248, 12, 12, 204, 120, 0	; 5
+	db 56, 96, 192, 248, 204, 204, 120, 0	; 6
+    db 252, 204, 12, 24, 48 ,48, 48, 0 		; 7
+    db 120, 204, 204, 120, 204, 204, 120, 0	; 8
+	db 120, 204, 204, 124, 12, 24, 112, 0	; 9
+	db 254, 98, 104, 120, 104, 96, 240, 0	; F
+	db 252, 102, 102, 124, 96, 96, 240, 0	; P
+	db 120, 204, 96, 48, 24, 204, 120, 0	; S
+	db 120, 48, 48, 48, 48, 48, 120, 0		; I
+	db 0, 48, 48, 0, 0, 48, 48, 0			; :
+FONT_TILES_END:
 
 SECTION "TileMap", ROMX
 TILE_MAP:
-	db DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+	db F_TILE_NUM, P_TILE_NUM, S_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
+	db 0,0,0,0,0,0,0
+	db I_TILE_NUM, P_TILE_NUM, F_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
+	db 0,0,0,0,0,0,0,0,0,0,0,0
 	REPT 4
 	REPT 32
 		db 0
@@ -1184,31 +1131,6 @@ TILE_MAP:
 	ENDR
 	ENDR
 TILE_MAP_END:
-
-SECTION "ZeroTileMap", ROMX
-ZERO_TILE_MAP:
-	db DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	REPT 4
-	REPT 32
-		db 0
-	ENDR
-	ENDR
-
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-
-	REPT 5
-	REPT 32
-		db 0
-	ENDR
-	ENDR
-ZERO_TILE_MAP_END:
 
 SECTION "Chip8Font", ROMX
 CHIP8_FONT:

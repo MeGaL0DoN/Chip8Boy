@@ -74,6 +74,13 @@ MACRO CHECK_MEM_WRITE_OOB
 	jp z, InstrEnd
 ENDM
 
+MACRO SKIP_NEXT_INSTR
+	pop bc
+	inc bc
+	inc bc
+	push bc
+ENDM
+
 ; \1 is table address, 256 byte aligned! Index is passed in A.
 MACRO JP_TABLE ; 
 	add a ; addresses are 2 bytes, so multiply by 2
@@ -98,15 +105,18 @@ DEF SCREEN_BUF_SIZE EQU 2048
 DEF FX0A_NOT_ACTIVE_FLAG EQU -1
 DEF FX0A_DONE_FLAG EQU -2
 
-DEF DIGIT0_TILE_NUM EQU $82
+DEF DIGIT0_TILE_NUM EQU $81
 DEF F_TILE_NUM EQU DIGIT0_TILE_NUM + 10
 DEF P_TILE_NUM EQU DIGIT0_TILE_NUM + 11
 DEF S_TILE_NUM EQU DIGIT0_TILE_NUM + 12
 DEF I_TILE_NUM EQU DIGIT0_TILE_NUM + 13
 DEF COL_TILE_NUM EQU DIGIT0_TILE_NUM + 14
+DEF RIGHT_LINE_TILE_NUM EQU DIGIT0_TILE_NUM + 15
+DEF LEFT_LINE_TILE_NUM EQU DIGIT0_TILE_NUM + 16
 
 DEF FPS_DIGIT0_TILEMAP_NUM EQU 4
 DEF IPF_DIGIT0_TILEMAP_NUM EQU 17
+DEF PAUSE_ICON_TILEMAP_NUM EQU 73
 
 SECTION "Variables", HRAM
 CHIP_STATE:
@@ -124,13 +134,13 @@ DELAY_TIMER:
 	ds 1
 SOUND_TIMER:
 	ds 1
+HIGH_RES_MODE_FLAG:
+	ds 1
 INSTR_COUNTER:
 	ds 1 
 INSTR_BLOCK_COUNTER:
 	ds 1
 IPF_PER_BLOCK:
-	ds 1
-IPF_PER_BLOCK_BACKUP:
 	ds 1
 IPF_DISPLAY:
 	ds 2
@@ -151,8 +161,11 @@ PRESSED_KEYS:
 	ds 1
 RELEASED_KEYS:
 	ds 1
-DXYN_XOR_MASK_LOOKUP:
+DXYN_MASK_LOOUKUPS:
+DXYN_LORES_MASK_LOOKUP:
 	ds 4
+DXYN_HIRES_MASK_LOOKUP:
+	ds 8
 ; Regular code temps:
 temp1:
 	ds 1
@@ -187,24 +200,31 @@ SECTION "VRAMScreenBuf", VRAM[$8010]
 VRAM_SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
 
-SECTION "DXYNLookup", ROMX, ALIGN[8]
-DXYN_BASE_ADDR_LOOKUP:
+SECTION "DXYNLoresLookup", ROMX, ALIGN[8]
+DXYN_LORES_BASE_ADDR_LOOKUP:
 	FOR x, CHIP_SCR_WIDTH
 		db LOW((x / 4) * 128 + SCREEN_BUF)
 		db HIGH((x / 4) * 128 + SCREEN_BUF)
 	ENDR
+SECTION "DXYNHiresLookup", ROMX, ALIGN[8]
+DXYN_HIRES_BASE_ADDR_LOOKUP:
+	FOR x, SCHIP_SCR_WIDTH
+		db LOW((x / 8) * 128 + SCREEN_BUF)
+		db HIGH((x / 8) * 128 + SCREEN_BUF)
+	ENDR
+
+SECTION "DXYNMaskLookups", ROMX
+DXYN_MASK_LOOKUPS_ROM:
+	FOR i, 4 ; lores
+		db (%11000000 >> (i * 2))
+	ENDR
+	FOR i, 8 ; hires
+		db (%10000000 >> i)
+	ENDR
+DXYN_MASK_LOOKUPS_ROM_END:
 
 MACRO UPDATE_IPF ; \1 = 0 - decrease, else increase
-	ldh a, [FX0A_KEY_REG]
-	cp FX0A_NOT_ACTIVE_FLAG
-	jr z, .normalLoad\@
-	; load backup pointer instead, since normal IPF should remain '1' during FX0A
-	ld hl, IPF_PER_BLOCK_BACKUP
-	jr .continue\@
-.normalLoad\@:
-	ld hl, IPF_PER_BLOCK
-.continue\@:
-	ld a, [hl]
+	ldh a, [IPF_PER_BLOCK]
 	IF \1 == 0
 		cp 1
 		ret z
@@ -214,7 +234,7 @@ MACRO UPDATE_IPF ; \1 = 0 - decrease, else increase
 		ret z
 		inc a
 	ENDC
-	ld [hl], a
+	ldh [IPF_PER_BLOCK], a
 	ld a, [IPF_DISPLAY]
 	ld hl, IPF_BLOCKS_NUM
 	IF \1 == 0
@@ -280,16 +300,25 @@ ResetChip8:
 	ldh [rLCDC], a ; disable LCD
 	jp InitChip8
 PauseChip8: ; Waits for start or select press to resume.
- .continueWait:
+	ld hl, ($98 << 8) | PAUSE_ICON_TILEMAP_NUM
+	ld a, RIGHT_LINE_TILE_NUM
+	ld [hl+], a
+	ld [hl], LEFT_LINE_TILE_NUM
+.continueWait:
 	xor a
 	ldh [rIF], a
 	halt
 	call UpdateKeys
 	ldh a, [PRESSED_KEYS]
 	bit PADB_START, a
-	ret nz
+	jr nz, .end
 	bit PADB_SELECT, a
 	jr z, .continueWait
+.end:
+	ld hl, ($98 << 8) | PAUSE_ICON_TILEMAP_NUM
+	xor a
+	ld [hl+], a
+	ld [hl], a
 	ret
 CheckFX0A:
 	ldh a, [RELEASED_KEYS]
@@ -326,8 +355,6 @@ CheckFX0A:
 	ldh [c], a 
 	ld a, FX0A_DONE_FLAG
 	ldh [FX0A_KEY_REG], a
-	ldh a, [IPF_PER_BLOCK_BACKUP]
-	ldh [IPF_PER_BLOCK], a
 	pop bc
 	ret
 
@@ -431,21 +458,7 @@ REPT 8
 	ld a, b
 	ld [hl+], a
 ENDR
-	MEMSET VRAM_CLEAR_TILE, 0, 16
-
-	ld hl, VRAM_FONT_TILES
-	ld de, FONT_TILES
-	ld bc, FONT_TILES_END - FONT_TILES
-.tileCopyLoop:
-	ld a, [de]
-	inc de
-	ld [hl+], a
-	ld a, $FF
-	ld [hl+], a
-	dec bc
-	ld a, b
-	or c
-	jr nz, .tileCopyLoop
+	MEMCPY_1BIT_TILES VRAM_FONT_TILES, FONT_TILES, FONT_TILES_END
 
 	; Setting palettes
 	ld a, $80
@@ -475,14 +488,7 @@ ENDR
 	ldh [PRESSED_KEYS], a
 	ldh [RELEASED_KEYS], a
 
-	ld hl, DXYN_XOR_MASK_LOOKUP
-	ld a, %11000000
-	ld [hl+], a
-	ld a, %00110000
-	ld [hl+], a
-	ld a, %00001100
-	ld [hl+], a
-	ld [hl], %00000011
+	MEMCPY DXYN_MASK_LOOUKUPS, DXYN_MASK_LOOKUPS_ROM, DXYN_MASK_LOOKUPS_ROM_END
 
 InitChip8:
 	MEMSET CHIP_RAM, 0, $200
@@ -551,17 +557,17 @@ InstrLoop:
 	ld hl, CHIP_RAM
 	add hl, de
 
-	; Storing pc + 2 back
+	; storing pc + 2 back
 	inc de
 	inc de
 	push de
 
-	; Loading chip8 instruction to DE
+	; loading chip8 instruction to DE
 	ld a, [hl+]
 	ld d, a
 	ld e, [hl]
 
-	; Jumping to opcode handler based on the first opcode nibble.
+	; jumping to opcode handler based on the first opcode nibble.
 	and $F0
 	swap a
 	JP_TABLE(MainJumpTable)
@@ -571,19 +577,25 @@ InstrEnd:
 	dec [hl] 
 	jr nz, InstrLoop
 	ldh a, [IPF_PER_BLOCK]
-	ld [hl], a ; Reload number of instructions per block
+	ld [hl], a ; reload number of instructions per block
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
 	jr nz, InstrLoop
-	ldh a, [DELAY_TIMER]
-	sub 1
-	adc 0 ; Bring back to 0, if decremented to $FF
-	ldh [DELAY_TIMER], a
 	ld a, [IPF_BLOCKS_NUM]
-	ld [hl], a ; Reload number of instruction blocks
-	ld a, 1
+	ld [hl], a ; reload number of instruction blocks
+InstrLoopEnd:
+	ld b, 1
+	ldh a, [DELAY_TIMER]
+	sub b
+	adc 0 ; bring back to 0, if decremented to $FF
+	ldh [DELAY_TIMER], a
+	ldh a, [SOUND_TIMER]
+	sub b
+	adc 0
+	ldh [SOUND_TIMER], a
+	ld a, b
 	ldh [FRAME_DONE_FLAG], a
-	halt ; Wait for VBlank
+	halt ; wait for VBlank
 
 	jr InstrLoop
 
@@ -606,9 +618,42 @@ Case0:
 
 	ld a, NN
 	cp $EE
-	jp z, OP_00EE
+	jr z, OP_00EE
 	cp $E0
+	jr z, OP_00E0
+	cp $FF
+	jr z, OP_00FF
+	cp $FE
 	jp nz, InvalidInstr
+
+OP_00FE:
+	xor a
+	ldh [HIGH_RES_MODE_FLAG], a
+	jr OP_00E0 ; clear screen
+
+OP_00FF:
+	ld a, 1
+	ldh [HIGH_RES_MODE_FLAG], a
+	jr OP_00E0
+
+OP_00EE:
+	ldh a, [CHIP_SP]
+	; updating SP
+	sub 2
+	and $1F
+	ldh [CHIP_SP], a
+
+	ld hl, sp + 0
+	add LOW(CHIP_STACK)
+	ld c, a
+	; loading address from the chip8 stack into PC
+	ldh a, [c]
+	ld [hl+], a
+	inc c
+	ldh a, [c]
+	ld [hl], a
+
+	jp InstrEnd
 
 OP_00E0: 
 	ld hl, SCREEN_BUF
@@ -633,25 +678,6 @@ OP_00E0:
 
 	jp InstrEnd
 
-OP_00EE:
-	ldh a, [CHIP_SP]
-	; Updating SP
-	sub 2
-	and $1F
-	ldh [CHIP_SP], a
-
-	ld hl, sp + 0
-	add LOW(CHIP_STACK)
-	ld c, a
-	; Loading address from the chip8 stack into PC
-	ldh a, [c]
-	ld [hl+], a
-	inc c
-	ldh a, [c]
-	ld [hl], a
-
-	jp InstrEnd
-
 Case1: 
 OP_1NNN:
 	ld hl, sp + 1
@@ -660,26 +686,25 @@ OP_1NNN:
 	ld [hl-], a
 	ld [hl], NN
 	
-	
 	jp InstrEnd
 
 Case2:
 OP_2NNN:
-	; load current PC to HL
+	; loading current PC to HL
 	pop hl
 
-	; Setting PC to new address
+	; setting PC to new address
 	LD_NNN()
 	push de
 	
-	; Updating SP
+	; updating SP
 	ldh a, [CHIP_SP]
 	ld b, a ; Saving current SP
 	add 2
 	and $1F
 	ldh [CHIP_SP], a
 
-	; Saving HL to the chip8 stack
+	; saving HL to the chip8 stack
 	ld a, LOW(CHIP_STACK)
 	add b ; saved sp
 
@@ -692,25 +717,12 @@ OP_2NNN:
 
 	jp InstrEnd
 
-MACRO COND_PC_ADD ; If first parameter is 1, add if equal. Else, add if not equal.
-	IF \1 == 1
-		jp nz, InstrEnd
-	ELSE
-		jp z, InstrEnd
-	ENDC
-
-	; Adding 2 to pc
-	pop de
-	inc de
-	inc de
-	push de
-ENDM
-
 Case3:
 OP_3XNN:
 	LD_VX()
 	cp NN
-	COND_PC_ADD(1) ; Check if equal
+	jp nz, InstrEnd ; skip if equal
+	SKIP_NEXT_INSTR()
 
 	jp InstrEnd
 
@@ -718,20 +730,22 @@ Case4:
 OP_4XNN:
 	LD_VX()
 	cp NN
-	COND_PC_ADD(0) ; Check if not equal
+	jp z, InstrEnd ; skip if not equal
+	SKIP_NEXT_INSTR()
 
 	jp InstrEnd
 
 Case5:
 OP_5XY0:
-	LD_N();
+	LD_N()
 	jp nz, InvalidInstr
 
 	LD_VY_PTR_HL()
 	LD_VX()
 
 	cp [hl]
-	COND_PC_ADD(1)
+	jp nz, InstrEnd
+	SKIP_NEXT_INSTR()
 
 	jp InstrEnd
 
@@ -763,7 +777,8 @@ OP_9XY0:
 	LD_VX()
 
 	cp [hl]
-	COND_PC_ADD(0)
+	jp z, InstrEnd
+	SKIP_NEXT_INSTR()
 
 	jp InstrEnd
 
@@ -797,9 +812,12 @@ OP_BNNN: ; Quirk off, jump to V[0] + NNN
 	jp InstrEnd
 
 CaseC:
-OP_CXNN:
+OP_CXNN: ; using timer register + LY as rng for now.
 	LD_VX_PTR_C()
-	ldh a, [rDIV] ; Use timer register as rng for now.
+	ldh a, [rLY]
+	ld b, a
+	ldh a, [rDIV]
+	xor b
 	and NN
 	ldh [c], a
 
@@ -807,13 +825,22 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	; \1 - pixel bit, \2 -  1 if it's  the last call in this dxyn, 0 if not.
+	; \1 - pixel bit, \2 - 1 if superchip hi-res, 0 if not, \3 - 1 if it's the last call in this dxyn, 0 if not.
 	MACRO DXYN_PROCESS_PIXEL 
 		IF \1 == 7
 			ld a, d ; X
-			and $3
+			IF \2 == 0
+				and $3
+			ELSE
+				and $7
+			ENDC
 		ENDC
-		add LOW(DXYN_XOR_MASK_LOOKUP)
+		IF \2 == 0
+			add LOW(DXYN_LORES_MASK_LOOKUP)
+		ELSE
+			add LOW(DXYN_HIRES_MASK_LOOKUP)
+		ENDC
+
 		ld c, a
 		ldh a, [c]
 		ld b, a ; saving mask in 'b'
@@ -830,12 +857,16 @@ OP_DXYN:
 		; drawing:
 		ld a, c
 		xor b
-		ld [hl+], a
-		; second byte is at hl + 2, since framebuf is double scaled.
-		inc l
-		ld [hl-], a
-		IF \2 == 0
-			dec l
+		; if superchip high-res is not active then write the byte again to hl + 2, since framebuf is double scaled.
+		IF \2 == 0 
+			ld [hl+], a
+			inc l
+			ld [hl-], a
+			IF \3 == 0
+				dec l
+			ENDC
+		ELSE
+			ld [hl], a
 		ENDC
 	ENDM
 
@@ -845,39 +876,49 @@ OP_DXYN:
 		jp InstrEnd	
 	ENDM
 
+	; \1 - loop label, \2 - 1 if superchip hi-res, 0 if not.
 	MACRO DXYN_CHECK_LOOP
 		pop bc
 		ldh a, [temp2] ; Y
 		inc a
-		cp CHIP_SCR_HEIGHT
+		IF \2 == 0
+			cp CHIP_SCR_HEIGHT
+		ELSE
+			cp SCHIP_SCR_HEIGHT
+		ENDC
 		jr z, .yClip\@
 		ldh [temp2], a
-		REPT 4
-			inc l ; updating screen buf pointer
-		ENDR
+		; add 2 to screen buf pointer
+		inc l
+		inc l
+		IF \2 == 0 ; add 2 more (skip next row since in lores it already was writen to)
+			inc l
+			inc l
+		ENDC
 		ldh a, [temp1] ; height counter
 		dec a
-		ldh [temp1], a
 		jp nz, \1
-
-.yClip\@:
+	.yClip\@:
 		DXYN_FINISH()
 	ENDM
 
-	; \1 - is 1 if no loop is needed (height is 1), 0 otherwise. 
-	MACRO DXYN
+	; \1 - 1 if superchip hi-res, 0 if not, \2 - 1 if no loop is needed (height is 1), 0 otherwise. 
+	MACRO DRAW_SPRITE
 	.heightLoop\@:
-		ld a, [bc]
-		IF \1 == 0
+		IF \2 == 0
+			ldh [temp1], a ; load height loop counter
+			ld a, [bc]
 			inc bc
 			push bc
+		ELSE
+			ld a, [bc]
 		ENDC
 
 		cp $80
 		jr nz, .regularDraw\@
-		DXYN_PROCESS_PIXEL 7, \1 ; single pixel draw
-		IF \1 == 0
-			DXYN_CHECK_LOOP(.heightLoop\@)
+		DXYN_PROCESS_PIXEL 7, \1, \2 ; single pixel draw
+		IF \2 == 0
+			DXYN_CHECK_LOOP .heightLoop\@, \1
 		ELSE
 			DXYN_FINISH()
 		ENDC		
@@ -891,9 +932,15 @@ OP_DXYN:
 			IF i != 7
 				ld a, d
 				add (7 - i)
-				cp CHIP_SCR_WIDTH
-				jp z, xClipLabel
-				and $3
+				IF \1 == 0
+					cp CHIP_SCR_WIDTH
+					jp z, xClipLabel
+					and $3
+				ELSE
+					cp SCHIP_SCR_WIDTH
+					jp z, xClipLabel
+					and $7
+				ENDC
 				jr nz, .noOffset\@
 				ld bc, 128
 				add hl, bc
@@ -901,62 +948,74 @@ OP_DXYN:
 		.noOffset\@:
        		bit i, e
         	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL i, i == 0
+        	DXYN_PROCESS_PIXEL i, \1, i == 0
     	.skipPixel\@:
     	ENDR
 
  	{xClipLabel}:
 		pop hl
-    	IF \1 == 0
-        	DXYN_CHECK_LOOP(.heightLoop\@)
+    	IF \2 == 0
+        	DXYN_CHECK_LOOP .heightLoop\@, \1
     	ELSE
         	DXYN_FINISH()
     	ENDC
 	ENDM
 
-	LD_VX()
-	and CHIP_SCR_WIDTH - 1
-	ld d, a
+	; \1 - 1 if superchip hi-res, 0 if not
+	MACRO DXYN
+		LD_VX()
+		IF \1 == 0
+			and CHIP_SCR_WIDTH - 1
+			ld d, a
+			ld h, HIGH(DXYN_LORES_BASE_ADDR_LOOKUP)
+		ELSE
+			and SCHIP_SCR_WIDTH - 1
+			ld d, a
+			ld h, HIGH(DXYN_HIRES_BASE_ADDR_LOOKUP)
+		ENDC
+		add a ; x * 2 (each entry is 2 bytes)
+		ld l, a
+		ld a, [hl+]
+		ld h, [hl]
+		ld l, a
 
-	; precomputed entries for: (x / 4) * 128 + SCREEN_BUF
-	ld h, HIGH(DXYN_BASE_ADDR_LOOKUP)
-	add a ; x * 2 (each entry is 2 bytes)
-	ld l, a
-	ld a, [hl+]
-	ld h, [hl]
-	ld l, a
+		LD_VY()
+		IF \1 == 0
+			and CHIP_SCR_HEIGHT - 1
+		ELSE
+			and SCHIP_SCR_HEIGHT - 1
+		ENDC
+		ldh [temp2], a
 
-	LD_VY()
-	and CHIP_SCR_HEIGHT - 1
-	ldh [temp2], a
+		; add y * 2 to screen buf addr in hires, y * 4 in lores
+		add a
+		IF \1 == 0
+			add a
+		ENDC
+		add l
+		ld l, a
 
-	; adding y * 4 to initial screen buf address
-	add a
-	add a
-	add l
-	ld l, a
+		; loading sprite addr to bc
+		LD_I_MEM_PTR b, c
 
-	; loading sprite addr to bc
-	LD_I_MEM_PTR b, c
+		xor a
+		ldh [VF], a
 
-	xor a
-	ldh [VF], a
+		LD_N()
+		jp z, InstrEnd
+		cp 1
+		jp nz, .regularDXYN\@
+		DRAW_SPRITE \1, 1
+	.regularDXYN\@:
+		DRAW_SPRITE \1, 0
+	ENDM
 
-	LD_N()
-	jp z, InstrEnd
-	cp 1
-	jp nz, .regularDXYN
-	DXYN(1)
-.regularDXYN:
-	ldh [temp1], a ; height loop counter
+	ldh a, [HIGH_RES_MODE_FLAG]
+	and a
+	jp nz, .highRes
 	DXYN(0)
-	
-CaseE: ; TODO input
-	ld a, NN
-	cp $A1
-	jr z, OP_EXA1
-	cp $9E
-	jp nz, InvalidInstr
+.highRes:
+	DXYN(1)
 
 MACRO LD_KEY
 	LD_VX()
@@ -964,29 +1023,30 @@ MACRO LD_KEY
 	ld h, HIGH(KEY_MAP)
 	ld l, a
 	ld a, [hl]
-	cp -1 ; Key is not mapped
+	cp -1 ; key is not mapped
 	jr z, .end\@
 	ld b, a
 	ldh a, [KEY_STATE]
 	and b
 .end\@:
 ENDM
-MACRO SKIP_NEXT_INSTR
-	pop hl
-	inc hl
-	inc hl
-	push hl
-ENDM
+	
+CaseE: 
+	ld a, NN
+	cp $A1
+	jr z, OP_EXA1
+	cp $9E
+	jp nz, InvalidInstr
 
 OP_EX9E:
 	LD_KEY()
-	jp z, InstrEnd ; Dont add + 2 if key is not pressed
+	jp z, InstrEnd ; dont skip if key is not pressed
 	SKIP_NEXT_INSTR()
 	jp InstrEnd
 
 OP_EXA1:
 	LD_KEY()
-	jp nz, InstrEnd ; Dont add + 2 if key is pressed
+	jp nz, InstrEnd ; dont skip if key is pressed
 	SKIP_NEXT_INSTR()
 	jp InstrEnd
 	
@@ -1138,20 +1198,16 @@ FX0A:
 	jr nz, .skipFX0AInit
 	LD_X()
 	ldh [FX0A_KEY_REG], a
-	; Save previous IPF and set current to 1 to limit CPU usage while waiting for key.
-	ldh a, [IPF_PER_BLOCK]
-	ldh [IPF_PER_BLOCK_BACKUP], a
-	ld a, 1
-	ldh [IPF_PER_BLOCK], a
 .skipFX0AInit:
 	cp FX0A_DONE_FLAG
 	jr z, .FX0ADone
 	; PC -= 2
-	pop hl
-	dec hl
-	dec hl
-	push hl
-	jp InstrEnd
+	pop bc
+	dec bc
+	dec bc
+	push bc
+	; jump straight to the frame end to limit CPU usage while waiting for key.
+	jp InstrLoopEnd
 .FX0ADone:
 	ld a, FX0A_NOT_ACTIVE_FLAG
 	ldh [FX0A_KEY_REG], a
@@ -1286,10 +1342,7 @@ VRAM_BG_TILE:
 	ds 16
 
 SECTION "VRAMTiles", VRAM[$8010 + SCREEN_BUF_SIZE]
-VRAM_CLEAR_TILE: ; Tile $81, always has off pixel color, is used for zero tile map
-	ds 16	
 VRAM_FONT_TILES:
-	ds 160
 
 SECTION "Tiles", ROMX
 FONT_TILES:
@@ -1308,6 +1361,8 @@ FONT_TILES:
 	db 120, 204, 96, 48, 24, 204, 120, 0	; S
 	db 120, 48, 48, 48, 48, 48, 120, 0		; I
 	db 0, 48, 48, 0, 0, 48, 48, 0			; :
+	db 6, 6, 6, 6, 6, 6, 6, 6			    ;  |
+	db 96, 96, 96, 96, 96, 96, 96, 96		; |
 FONT_TILES_END:
 
 SECTION "TileMap", ROMX
@@ -1366,7 +1421,7 @@ FX0A_KEY_MAP: ; The opposite (gb key bits as indexes to chip8 keys)
 	db 3 ; dpad up
 	db 0 ; dpad down
 INITIAL_IPF_PER_BLOCK:
-	db 177
+	db 173
 IPF_BLOCKS_NUM:
 	db 2
 CHIP8_FONT:
@@ -1577,68 +1632,78 @@ CHIP_ROM_END:
 ; 	db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ; 	db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 101, 0, 23, 46,
 ; 	db 101, 1, 23, 46
+
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
+
 
 ; CHIP_ROM: ; random number
 ; 	db 101,0,0,224,195,255,162,34,243,51,242,101,100,0,240,41,212,85,116,5,241,41,212,85,116,5,242,41,212,85,243,10,18,2
+
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
+
+; CHIP_ROM:
+; 	; keypad
+; 	db 19, 12, 96, 0, 224, 161, 18, 4, 112, 1, 64, 16, 0, 238, 18, 4, 101, 0, 162,
+; 	db 34, 241, 85, 162, 130, 241, 85, 18, 34, 67, 1, 208, 18, 34, 2, 0, 0, 245,
+; 	db 30, 245, 30, 245, 30, 245, 30, 241, 101, 99, 0, 243, 21, 244, 7, 52, 0, 18,
+; 	db 68, 164, 35, 208, 18, 100, 10, 244, 21, 100, 1, 131, 67, 100, 14, 228, 158,
+; 	db 18, 82, 69, 0, 18, 82, 117, 255, 18, 28, 100, 15, 228, 158, 18, 96, 149, 32,
+; 	db 18, 96, 117, 1, 18, 28, 134, 80, 100, 10, 228, 161, 18, 128, 100, 0, 114, 1,
+; 	db 116, 1, 228, 158, 18, 120, 134, 64, 118, 255, 18, 128, 84, 32, 18, 108, 114,
+; 	db 255, 18, 50, 34, 2, 0, 0, 246, 30, 246, 30, 246, 30, 246, 30, 100, 2, 244,
+; 	db 30, 241, 101, 100, 16, 128, 65, 162, 154, 241, 85, 0, 0, 252, 101, 35, 2,
+; 	db 65, 0, 0, 238, 128, 16, 35, 2, 66, 0, 0, 238, 128, 32, 35, 2, 67, 0, 0, 238,
+; 	db 128, 48, 35, 2, 68, 0, 0, 238, 128, 64, 35, 2, 69, 0, 0, 238, 128, 80, 35,
+; 	db 2, 70, 0, 0, 238, 128, 96, 35, 2, 71, 0, 0, 238, 128, 112, 35, 2, 72, 0, 0,
+; 	db 238, 128, 128, 35, 2, 73, 0, 0, 238, 128, 144, 35, 2, 74, 0, 0, 238, 128,
+; 	db 160, 35, 2, 75, 0, 0, 238, 128, 176, 35, 2, 76, 0, 0, 238, 128, 192, 35, 2,
+; 	db 0, 238, 164, 39, 240, 30, 221, 228, 125, 4, 0, 238, 0, 224, 161, 255, 240,
+; 	db 101, 64, 1, 19, 84, 64, 2, 19, 88, 64, 3, 19, 190, 109, 10, 110, 2, 164,
+; 	db 211, 34, 156, 109, 8, 110, 10, 164, 223, 34, 156, 109, 8, 110, 15, 164, 235,
+; 	db 34, 156, 109, 8, 110, 20, 164, 245, 34, 156, 106, 50, 107, 27, 165, 137,
+; 	db 218, 180, 106, 58, 165, 141, 218, 180, 96, 164, 97, 199, 98, 2, 18, 16, 97,
+; 	db 158, 19, 90, 97, 161, 96, 238, 163, 158, 241, 85, 0, 224, 165, 51, 255, 101,
+; 	db 164, 18, 255, 85, 109, 18, 110, 3, 165, 67, 34, 156, 109, 18, 110, 10, 165,
+; 	db 75, 34, 156, 109, 18, 110, 17, 165, 83, 34, 156, 109, 18, 110, 24, 165, 91,
+; 	db 34, 156, 110, 0, 35, 150, 126, 1, 78, 16, 110, 0, 19, 140, 164, 18, 254, 30,
+; 	db 240, 101, 98, 1, 238, 161, 98, 0, 144, 32, 19, 188, 128, 224, 128, 14, 165,
+; 	db 99, 240, 30, 241, 101, 165, 131, 208, 22, 164, 18, 254, 30, 128, 32, 240,
+; 	db 85, 0, 238, 0, 224, 109, 6, 110, 13, 165, 3, 34, 156, 96, 3, 240, 21, 240,
+; 	db 10, 241, 7, 49, 0, 19, 242, 224, 161, 19, 248, 0, 224, 164, 37, 96, 30, 97,
+; 	db 9, 208, 19, 109, 16, 110, 17, 165, 17, 34, 156, 34, 2, 240, 10, 34, 2, 19,
+; 	db 12, 109, 10, 165, 26, 19, 252, 109, 8, 165, 38, 0, 224, 110, 17, 34, 156,
+; 	db 164, 40, 96, 30, 97, 9, 208, 19, 34, 2, 240, 10, 34, 2, 19, 12, 0, 0, 0, 0,
+; 	db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 192, 160, 192, 128, 160, 64,
+; 	db 160, 224, 160, 160, 224, 192, 64, 64, 224, 224, 32, 192, 224, 224, 96, 32,
+; 	db 224, 160, 224, 32, 32, 224, 192, 32, 192, 224, 128, 224, 224, 224, 32, 32,
+; 	db 32, 224, 224, 160, 224, 224, 224, 32, 224, 64, 160, 224, 160, 192, 224, 160,
+; 	db 224, 224, 128, 128, 224, 192, 160, 160, 192, 224, 192, 128, 224, 224, 128,
+; 	db 192, 128, 96, 128, 160, 96, 160, 224, 160, 160, 224, 64, 64, 224, 96, 32,
+; 	db 32, 192, 160, 192, 160, 160, 128, 128, 128, 224, 224, 224, 160, 160, 192,
+; 	db 160, 160, 160, 224, 160, 160, 224, 192, 160, 192, 128, 64, 160, 224, 96,
+; 	db 192, 160, 192, 160, 96, 192, 32, 192, 224, 64, 64, 64, 160, 160, 160, 96,
+; 	db 160, 160, 160, 64, 160, 160, 224, 224, 160, 64, 160, 160, 160, 160, 64, 64,
+; 	db 224, 96, 128, 224, 0, 0, 0, 0, 0, 224, 0, 0, 0, 0, 0, 64, 4, 11, 3, 84, 4,
+; 	db 16, 3, 88, 4, 21, 3, 190, 104, 76, 52, 84, 148, 100, 104, 52, 100, 56, 60,
+; 	db 0, 8, 148, 60, 136, 40, 60, 148, 56, 100, 132, 96, 0, 12, 148, 60, 136, 44,
+; 	db 8, 148, 124, 104, 0, 16, 148, 64, 136, 4, 44, 148, 68, 60, 120, 84, 60, 140,
+; 	db 0, 104, 112, 60, 116, 116, 148, 44, 96, 140, 148, 84, 60, 140, 0, 44, 88,
+; 	db 88, 148, 68, 100, 100, 56, 0, 96, 100, 120, 148, 72, 44, 88, 120, 76, 96,
+; 	db 68, 0, 96, 100, 120, 148, 112, 60, 88, 60, 44, 116, 60, 56, 0, 0, 0, 0, 0,
+; 	db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 148, 12, 148, 16, 148, 52, 0, 20,
+; 	db 148, 24, 148, 28, 148, 56, 0, 32, 148, 36, 148, 40, 148, 60, 0, 44, 148, 4,
+; 	db 148, 48, 148, 64, 0, 24, 23, 16, 2, 24, 2, 32, 2, 16, 9, 24, 9, 32, 9, 16,
+; 	db 16, 24, 16, 32, 16, 16, 23, 32, 23, 40, 2, 40, 9, 40, 16, 40, 23, 254, 254,
+; 	db 254, 254, 254, 254, 10, 174, 162, 66, 56, 8, 48, 184
+	
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
+; CHIP_ROM_END:
+
 
 ; SECTION "Chip8 ROM", ROMX
 ; CHIP_ROM:
-; 	; keypad
-
-; 	; db 19, 12, 96, 0, 224, 161, 18, 4, 112, 1, 64, 16, 0, 238, 18, 4, 101, 0, 162,
-; 	; db 34, 241, 85, 162, 130, 241, 85, 18, 34, 67, 1, 208, 18, 34, 2, 0, 0, 245,
-; 	; db 30, 245, 30, 245, 30, 245, 30, 241, 101, 99, 0, 243, 21, 244, 7, 52, 0, 18,
-; 	; db 68, 164, 35, 208, 18, 100, 10, 244, 21, 100, 1, 131, 67, 100, 14, 228, 158,
-; 	; db 18, 82, 69, 0, 18, 82, 117, 255, 18, 28, 100, 15, 228, 158, 18, 96, 149, 32,
-; 	; db 18, 96, 117, 1, 18, 28, 134, 80, 100, 10, 228, 161, 18, 128, 100, 0, 114, 1,
-; 	; db 116, 1, 228, 158, 18, 120, 134, 64, 118, 255, 18, 128, 84, 32, 18, 108, 114,
-; 	; db 255, 18, 50, 34, 2, 0, 0, 246, 30, 246, 30, 246, 30, 246, 30, 100, 2, 244,
-; 	; db 30, 241, 101, 100, 16, 128, 65, 162, 154, 241, 85, 0, 0, 252, 101, 35, 2,
-; 	; db 65, 0, 0, 238, 128, 16, 35, 2, 66, 0, 0, 238, 128, 32, 35, 2, 67, 0, 0, 238,
-; 	; db 128, 48, 35, 2, 68, 0, 0, 238, 128, 64, 35, 2, 69, 0, 0, 238, 128, 80, 35,
-; 	; db 2, 70, 0, 0, 238, 128, 96, 35, 2, 71, 0, 0, 238, 128, 112, 35, 2, 72, 0, 0,
-; 	; db 238, 128, 128, 35, 2, 73, 0, 0, 238, 128, 144, 35, 2, 74, 0, 0, 238, 128,
-; 	; db 160, 35, 2, 75, 0, 0, 238, 128, 176, 35, 2, 76, 0, 0, 238, 128, 192, 35, 2,
-; 	; db 0, 238, 164, 39, 240, 30, 221, 228, 125, 4, 0, 238, 0, 224, 161, 255, 240,
-; 	; db 101, 64, 1, 19, 84, 64, 2, 19, 88, 64, 3, 19, 190, 109, 10, 110, 2, 164,
-; 	; db 211, 34, 156, 109, 8, 110, 10, 164, 223, 34, 156, 109, 8, 110, 15, 164, 235,
-; 	; db 34, 156, 109, 8, 110, 20, 164, 245, 34, 156, 106, 50, 107, 27, 165, 137,
-; 	; db 218, 180, 106, 58, 165, 141, 218, 180, 96, 164, 97, 199, 98, 2, 18, 16, 97,
-; 	; db 158, 19, 90, 97, 161, 96, 238, 163, 158, 241, 85, 0, 224, 165, 51, 255, 101,
-; 	; db 164, 18, 255, 85, 109, 18, 110, 3, 165, 67, 34, 156, 109, 18, 110, 10, 165,
-; 	; db 75, 34, 156, 109, 18, 110, 17, 165, 83, 34, 156, 109, 18, 110, 24, 165, 91,
-; 	; db 34, 156, 110, 0, 35, 150, 126, 1, 78, 16, 110, 0, 19, 140, 164, 18, 254, 30,
-; 	; db 240, 101, 98, 1, 238, 161, 98, 0, 144, 32, 19, 188, 128, 224, 128, 14, 165,
-; 	; db 99, 240, 30, 241, 101, 165, 131, 208, 22, 164, 18, 254, 30, 128, 32, 240,
-; 	; db 85, 0, 238, 0, 224, 109, 6, 110, 13, 165, 3, 34, 156, 96, 3, 240, 21, 240,
-; 	; db 10, 241, 7, 49, 0, 19, 242, 224, 161, 19, 248, 0, 224, 164, 37, 96, 30, 97,
-; 	; db 9, 208, 19, 109, 16, 110, 17, 165, 17, 34, 156, 34, 2, 240, 10, 34, 2, 19,
-; 	; db 12, 109, 10, 165, 26, 19, 252, 109, 8, 165, 38, 0, 224, 110, 17, 34, 156,
-; 	; db 164, 40, 96, 30, 97, 9, 208, 19, 34, 2, 240, 10, 34, 2, 19, 12, 0, 0, 0, 0,
-; 	; db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 192, 160, 192, 128, 160, 64,
-; 	; db 160, 224, 160, 160, 224, 192, 64, 64, 224, 224, 32, 192, 224, 224, 96, 32,
-; 	; db 224, 160, 224, 32, 32, 224, 192, 32, 192, 224, 128, 224, 224, 224, 32, 32,
-; 	; db 32, 224, 224, 160, 224, 224, 224, 32, 224, 64, 160, 224, 160, 192, 224, 160,
-; 	; db 224, 224, 128, 128, 224, 192, 160, 160, 192, 224, 192, 128, 224, 224, 128,
-; 	; db 192, 128, 96, 128, 160, 96, 160, 224, 160, 160, 224, 64, 64, 224, 96, 32,
-; 	; db 32, 192, 160, 192, 160, 160, 128, 128, 128, 224, 224, 224, 160, 160, 192,
-; 	; db 160, 160, 160, 224, 160, 160, 224, 192, 160, 192, 128, 64, 160, 224, 96,
-; 	; db 192, 160, 192, 160, 96, 192, 32, 192, 224, 64, 64, 64, 160, 160, 160, 96,
-; 	; db 160, 160, 160, 64, 160, 160, 224, 224, 160, 64, 160, 160, 160, 160, 64, 64,
-; 	; db 224, 96, 128, 224, 0, 0, 0, 0, 0, 224, 0, 0, 0, 0, 0, 64, 4, 11, 3, 84, 4,
-; 	; db 16, 3, 88, 4, 21, 3, 190, 104, 76, 52, 84, 148, 100, 104, 52, 100, 56, 60,
-; 	; db 0, 8, 148, 60, 136, 40, 60, 148, 56, 100, 132, 96, 0, 12, 148, 60, 136, 44,
-; 	; db 8, 148, 124, 104, 0, 16, 148, 64, 136, 4, 44, 148, 68, 60, 120, 84, 60, 140,
-; 	; db 0, 104, 112, 60, 116, 116, 148, 44, 96, 140, 148, 84, 60, 140, 0, 44, 88,
-; 	; db 88, 148, 68, 100, 100, 56, 0, 96, 100, 120, 148, 72, 44, 88, 120, 76, 96,
-; 	; db 68, 0, 96, 100, 120, 148, 112, 60, 88, 60, 44, 116, 60, 56, 0, 0, 0, 0, 0,
-; 	; db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 148, 12, 148, 16, 148, 52, 0, 20,
-; 	; db 148, 24, 148, 28, 148, 56, 0, 32, 148, 36, 148, 40, 148, 60, 0, 44, 148, 4,
-; 	; db 148, 48, 148, 64, 0, 24, 23, 16, 2, 24, 2, 32, 2, 16, 9, 24, 9, 32, 9, 16,
-; 	; db 16, 24, 16, 32, 16, 16, 23, 32, 23, 40, 2, 40, 9, 40, 16, 40, 23, 254, 254,
-; 	; db 254, 254, 254, 254, 10, 174, 162, 66, 56, 8, 48, 184
 
 
 ; 	; brix

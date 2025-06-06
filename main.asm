@@ -781,12 +781,11 @@ MACRO SCROLL_HORIZONTAL
 	; clear half of right/left column
 	IF \1 == 0
 		ld hl, SCREEN_BUF + (128 * 16)
-		ld b, $F0
+		ld bc, ($F0 << 8) | 8
 	ELSE
 		ld hl, SCREEN_BUF
-		ld b, $0F
+		ld bc, ($0F << 8) | 8
 	ENDC
-	ld c, 8
 
 .clearHalfTile\@
 	REPT 8

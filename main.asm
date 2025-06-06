@@ -673,116 +673,142 @@ OP_00E0:
 
 	jp InstrEnd
 
-OP_00CN: ; scroll down N pixels
-	jp InstrEnd
-
-OP_00FB: ; scroll right 4 pixels 
-	ld hl, SCREEN_BUF + (128 * 16) - 2
-	ld de, SCREEN_BUF + (128 * 15) - 2
+; \1 = 0 - left, otherwise right.
+MACRO SCROLL_HORIZONTAL 
+	ld b, b
+	IF \1 == 0
+		ld hl, SCREEN_BUF
+		ld de, SCREEN_BUF + 128
+	ELSE
+		ld hl, SCREEN_BUF + (128 * 16) - 2
+		ld de, SCREEN_BUF + (128 * 15) - 2
+	ENDC
 	ld c, 120
 
 	ldh a, [HIGH_RES_MODE_FLAG]
 	and a
-	jp nz, .highResMode
+	jp nz, .highResMode\@
 
-.moveTile
+.moveTile\@:
 	REPT 7
+		ld a, [de]
+		IF \1 == 0
+			ld [hl+], a
+			inc l
+			inc e
+			inc e
+		ELSE
+			ld [hl-], a
+			dec l
+			dec e
+			dec e
+		ENDC
+	ENDR
+
+	; increment hl/de every eigth iteration since it can carry to high byte.
+	IF \1 == 0
+		ld a, [de]
+		ld [hl+], a
+		inc hl
+		inc e
+		inc de
+	ELSE
 		ld a, [de]
 		ld [hl-], a
 		dec l
+		dec de
 		dec e
-		dec e
-	ENDR
-
-	ld a, [de]
-	ld [hl-], a
-	dec l
-	dec de
-	dec e
+	ENDC
 
 	dec c
-	jr nz, .moveTile
+	jr nz, .moveTile\@
 
-	; clear left column
-	ld hl, SCREEN_BUF
+	; clear right/left column
+	IF \1 == 0
+		ld hl, SCREEN_BUF + (128 * 16)
+	ELSE
+		ld hl, SCREEN_BUF
+	ENDC
 	ld c, 8
 	xor a
 
-.clearTile
+.clearTile\@:
 	REPT 8
 		ld [hl+], a
 		inc l
 	ENDR
 	dec c
-	jr nz, .clearTile
+	jr nz, .clearTile\@
 
 	jp InstrEnd
 
-.highResMode:
-	; REPT 8
-	; ld a, [de]
-	; and $F
-	; swap a
-	; ld b, a
-	; ld a, [hl]
-	; swap a
-	; and $F
-	; or b
-	; ld [hl-], a
-	; dec hl
-	; dec de
-	; dec de
-	; ENDR
+.highResMode\@:
+	REPT 8
+		ld a, [de]
+		; if scrolling left, create mask with msb nibble moved to lsb. If right, then lsb to msb.
+		swap a
+		IF \1 == 0 ; a >> 4
+			and $0F 
+		ELSE ; a << 4
+			and $F0
+		ENDC
+		ld b, a
+		ld a, [hl]
+		swap a
+		IF \1 == 0 ; a << 4
+			and $F0
+		ELSE ; a >> 4
+			and $0F
+		ENDC
+		; apply mask
+		or b
+		IF \1 == 0
+			ld [hl+], a
+			inc hl
+			inc e
+			inc de
+		ELSE
+			ld [hl-], a
+			dec l
+			dec de
+			dec e
+		ENDC
+	ENDR
 
-	; dec c
-	; jp nz, .highResMode
+	dec c
+	jp nz, .highResMode\@
 
+	; clear half of right/left column
+	IF \1 == 0
+		ld hl, SCREEN_BUF + (128 * 16)
+		ld b, $F0
+	ELSE
+		ld hl, SCREEN_BUF
+		ld b, $0F
+	ENDC
+	ld c, 8
+
+.clearHalfTile\@
+	REPT 8
+		ld a, [hl]
+		and b
+		ld [hl+], a
+		inc l
+	ENDR
+	dec c
+	jr nz, .clearHalfTile\@
+
+	ld b, b
 	jp InstrEnd
+ENDM
 
+OP_00FB: ; scroll right 4 pixels 
+	SCROLL_HORIZONTAL(1)
 
 OP_00FC: ; scroll left 4 pixels
-	ld hl, SCREEN_BUF
-	ld de, SCREEN_BUF + 128
-	ld c, 120
+	SCROLL_HORIZONTAL(0)
 
-	ldh a, [HIGH_RES_MODE_FLAG]
-	and a
-	jp nz, .highResMode
-
-.moveTile
-	REPT 7
-		ld a, [de]
-		ld [hl+], a
-		inc l
-		inc e
-		inc e
-	ENDR
-
-	ld a, [de]
-	ld [hl+], a
-	inc hl
-	inc e
-	inc de
-
-	dec c
-	jr nz, .moveTile
-
-	; clear right column
-	ld hl, SCREEN_BUF + (128 * 16)
-	ld c, 8
-	xor a
-
-.clearTile
-	REPT 8
-		ld [hl+], a
-		inc l
-	ENDR
-	dec c
-	jr nz, .clearTile
-
-	jp InstrEnd
-
-.highResMode:
+OP_00CN: ; scroll down N pixels
 	jp InstrEnd
 
 OP_00FE:

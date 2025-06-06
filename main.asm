@@ -81,9 +81,9 @@ MACRO SKIP_NEXT_INSTR
 	push bc
 ENDM
 
-; \1 is table address, 256 byte aligned! Index is passed in A.
+; \1 - table address, 256 byte aligned. index is passed in 'a'.
 MACRO JP_TABLE ; 
-	add a ; addresses are 2 bytes, so multiply by 2
+	add a
 	ld h, HIGH(\1)
 	ld l, a
 
@@ -415,41 +415,38 @@ SECTION "Header", ROM0[$100]
 	ds $150 - @, 0 ; Make room for the header
 
 EntryPoint:
-	; Enable double speed mode
-	set 0, a
-	ldh [rKEY1], a
-	stop
-
-	; Shut down audio circuitry
+	; disabling audio circuitry
 	xor a
 	ldh [rNR52], a
 
-	; Set stack
-	ld sp, $D000
-
-	; Clear IF and set IE to enable vblank interrupts
+	; enabling vblank interrupts
 	ldh [rIF], a
 	ld a, IEF_VBLANK
 	ldh [rIE], a
 
-	; Waiting for vblank and disabling lcd to copy tile map and set initial tiles
+	; waiting for vblank to disable lcd
 	halt 
 	xor a
 	ldh [rLCDC], a
 
+	; enabling double speed mode
+	inc a
+	ldh [rKEY1], a
+	stop
+
+	; set stack
+	ld sp, $D000
+
 	MEMCPY $9800, TILE_MAP, TILE_MAP_END
 	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
+	; set attribute map to zero (use palette 0 and tile bank 0, no flips)
 	set 0, a
 	ldh [rVBK], a
-
-	; Set attribute map to zero (use palette 0 and tile bank 0, no flips)
 	MEMSET $9800, 0, $400
-
 	xor a
 	ldh [rVBK], a
 
-	; Setting bg tile (used for area outside chip8 screen) to '10'
 	ld hl, VRAM_BG_TILE
 	ld b, $FF
 REPT 8
@@ -460,24 +457,24 @@ REPT 8
 ENDR
 	MEMCPY_1BIT_TILES VRAM_FONT_TILES, FONT_TILES, FONT_TILES_END
 
-	; Setting palettes
+	; setting palettes
 	ld a, $80
-	ldh [rBCPS], a ; Auto-increment, initial address 0.
+	ldh [rBCPS], a ; auto-increment, initial address 0.
 	ld c, LOW(rBCPD)
-	; Color 00 (black chip8 pixel)
+	; color 00 (black chip8 pixel)
 	xor a
 	ldh [c], a
 	ldh [c], a
-	; Color 01 (white chip8 pixel)
+	; color 01 (white chip8 pixel)
 	ld a, $FF
 	ldh [c], a
 	ldh [c], a
-	; Color 10 (background, light-blue)
+	; color 10 (background, light-blue)
 	ld a, $55
 	ldh [c], a
 	ld a, $73
 	ldh [c], a
-	; Color 11 (text, yellow)
+	; color 11 (text, yellow)
 	ld a, $FF
 	ldh [c], a
 	ld a, $07
@@ -504,11 +501,11 @@ InitChip8:
 	ld a, -1
 	ldh [FX0A_KEY_REG], a
 
-	; Reset chip8 PC
+	; reset chip8 PC
 	ld de, $200
 	push de
 
-	; Setting IPF variables
+	; setting IPF variables
 	ld a, [IPF_BLOCKS_NUM]
 	ld e, a
 	ldh [INSTR_BLOCK_COUNTER], a
@@ -525,7 +522,7 @@ InitChip8:
 	ld [hl+], a
 	ld [hl], b
 
-	; Setting initial IPF digits on the tilemap.
+	; setting initial IPF digits on the tilemap.
 	ld hl, ($98 << 8) + IPF_DIGIT0_TILEMAP_NUM
 	ld e, DIGIT0_TILE_NUM
 	ld a, b
@@ -541,10 +538,10 @@ InitChip8:
 	add e
 	ld [hl], a
 
-	; Turn LCD back on.
+	; turning LCD back on.
 	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
 	ldh [rLCDC], a
-	; Enable interrupts
+	; enabling interrupts
 	xor a
 	ldh [rIF], a
 	ei
@@ -621,20 +618,18 @@ Case0:
 	jr z, OP_00EE
 	cp $E0
 	jr z, OP_00E0
-	cp $FF
-	jr z, OP_00FF
+	cp $FB
+	jp z, OP_00FB
+	cp $FC
+	jp z, OP_00FC
 	cp $FE
-	jp nz, InvalidInstr
-
-OP_00FE:
-	xor a
-	ldh [HIGH_RES_MODE_FLAG], a
-	jr OP_00E0 ; clear screen
-
-OP_00FF:
-	ld a, 1
-	ldh [HIGH_RES_MODE_FLAG], a
-	jr OP_00E0
+	jp z, OP_00FE
+	cp $FF
+	jp z, OP_00FF
+	and $F0
+	cp $C0
+	jp z, OP_00CN
+	jp InvalidInstr
 
 OP_00EE:
 	ldh a, [CHIP_SP]
@@ -677,6 +672,128 @@ OP_00E0:
 	ldh [DRAW_FLAG], a
 
 	jp InstrEnd
+
+OP_00CN: ; scroll down N pixels
+	jp InstrEnd
+
+OP_00FB: ; scroll right 4 pixels 
+	ld hl, SCREEN_BUF + (128 * 16) - 2
+	ld de, SCREEN_BUF + (128 * 15) - 2
+	ld c, 120
+
+	ldh a, [HIGH_RES_MODE_FLAG]
+	and a
+	jp nz, .highResMode
+
+.moveTile
+	REPT 7
+		ld a, [de]
+		ld [hl-], a
+		dec l
+		dec e
+		dec e
+	ENDR
+
+	ld a, [de]
+	ld [hl-], a
+	dec l
+	dec de
+	dec e
+
+	dec c
+	jr nz, .moveTile
+
+	; clear left column
+	ld hl, SCREEN_BUF
+	ld c, 8
+	xor a
+
+.clearTile
+	REPT 8
+		ld [hl+], a
+		inc l
+	ENDR
+	dec c
+	jr nz, .clearTile
+
+	jp InstrEnd
+
+.highResMode:
+	; REPT 8
+	; ld a, [de]
+	; and $F
+	; swap a
+	; ld b, a
+	; ld a, [hl]
+	; swap a
+	; and $F
+	; or b
+	; ld [hl-], a
+	; dec hl
+	; dec de
+	; dec de
+	; ENDR
+
+	; dec c
+	; jp nz, .highResMode
+
+	jp InstrEnd
+
+
+OP_00FC: ; scroll left 4 pixels
+	ld hl, SCREEN_BUF
+	ld de, SCREEN_BUF + 128
+	ld c, 120
+
+	ldh a, [HIGH_RES_MODE_FLAG]
+	and a
+	jp nz, .highResMode
+
+.moveTile
+	REPT 7
+		ld a, [de]
+		ld [hl+], a
+		inc l
+		inc e
+		inc e
+	ENDR
+
+	ld a, [de]
+	ld [hl+], a
+	inc hl
+	inc e
+	inc de
+
+	dec c
+	jr nz, .moveTile
+
+	; clear right column
+	ld hl, SCREEN_BUF + (128 * 16)
+	ld c, 8
+	xor a
+
+.clearTile
+	REPT 8
+		ld [hl+], a
+		inc l
+	ENDR
+	dec c
+	jr nz, .clearTile
+
+	jp InstrEnd
+
+.highResMode:
+	jp InstrEnd
+
+OP_00FE:
+	xor a
+	ldh [HIGH_RES_MODE_FLAG], a
+	jp OP_00E0 ; clear screen
+
+OP_00FF:
+	ld a, 1
+	ldh [HIGH_RES_MODE_FLAG], a
+	jp OP_00E0
 
 Case1: 
 OP_1NNN:
@@ -1442,18 +1559,23 @@ CHIP8_FONT:
 	db $F0, $80, $F0, $80, $F0, ; E
 	db $F0, $80, $F0, $80, $80  ; F
 CHIP8_FONT_END:
-CHIP_ROM: ; 1dcell
-	db 18, 138, 128, 124, 1, 109, 0, 34, 33, 104, 1, 57, 0, 34, 67, 136, 162, 56,
-	db 0, 221, 193, 125, 1, 61, 64, 18, 7, 123, 1, 109, 0, 0, 238, 105, 0, 128,
-	db 208, 208, 177, 79, 1, 121, 2, 208, 177, 112, 255, 208, 177, 79, 1, 121, 4,
-	db 208, 177, 112, 2, 208, 177, 79, 1, 121, 1, 208, 177, 0, 238, 98, 0, 136,
-	db 142, 114, 1, 143, 144, 143, 39, 79, 0, 18, 69, 0, 238, 0, 224, 109, 0, 108,
-	db 5, 139, 192, 122, 1, 34, 105, 96, 31, 129, 192, 162, 2, 208, 17, 0, 238,
-	db 128, 160, 162, 135, 240, 51, 242, 101, 100, 0, 240, 41, 99, 0, 211, 69, 241,
-	db 41, 115, 5, 211, 69, 242, 41, 115, 5, 211, 69, 0, 238, 0, 0, 0, 106, 20, 34,
-	db 83, 34, 3, 76, 31, 34, 83, 18, 142
+; CHIP_ROM: ; 1dcell
+; 	db 18, 138, 128, 124, 1, 109, 0, 34, 33, 104, 1, 57, 0, 34, 67, 136, 162, 56,
+; 	db 0, 221, 193, 125, 1, 61, 64, 18, 7, 123, 1, 109, 0, 0, 238, 105, 0, 128,
+; 	db 208, 208, 177, 79, 1, 121, 2, 208, 177, 112, 255, 208, 177, 79, 1, 121, 4,
+; 	db 208, 177, 112, 2, 208, 177, 79, 1, 121, 1, 208, 177, 0, 238, 98, 0, 136,
+; 	db 142, 114, 1, 143, 144, 143, 39, 79, 0, 18, 69, 0, 238, 0, 224, 109, 0, 108,
+; 	db 5, 139, 192, 122, 1, 34, 105, 96, 31, 129, 192, 162, 2, 208, 17, 0, 238,
+; 	db 128, 160, 162, 135, 240, 51, 242, 101, 100, 0, 240, 41, 99, 0, 211, 69, 241,
+; 	db 41, 115, 5, 211, 69, 242, 41, 115, 5, 211, 69, 0, 238, 0, 0, 0, 106, 20, 34,
+; 	db 83, 34, 3, 76, 31, 34, 83, 18, 142
 
-	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
+; CHIP_ROM_END:
+
+CHIP_ROM: ; schip scrolling test
+		db 19,12,96,0,224,161,18,4,112,1,64,16,0,238,18,4,101,0,162,34,241,85,162,130,241,85,18,34,67,1,208,18,34,2,0,0,245,30,245,30,245,30,245,30,241,101,99,0,243,21,244,7,52,0,18,68,165,231,208,18,100,10,244,21,100,1,131,67,100,14,228,158,18,82,69,0,18,82,117,255,18,28,100,15,228,158,18,96,149,32,18,96,117,1,18,28,134,80,100,10,228,161,18,128,100,0,114,1,116,1,228,158,18,120,134,64,118,255,18,128,84,32,18,108,114,255,18,50,34,2,0,0,246,30,246,30,246,30,246,30,100,2,244,30,241,101,100,16,128,65,162,154,241,85,0,0,252,101,35,2,65,0,0,238,128,16,35,2,66,0,0,238,128,32,35,2,67,0,0,238,128,48,35,2,68,0,0,238,128,64,35,2,69,0,0,238,128,80,35,2,70,0,0,238,128,96,35,2,71,0,0,238,128,112,35,2,72,0,0,238,128,128,35,2,73,0,0,238,128,144,35,2,74,0,0,238,128,160,35,2,75,0,0,238,128,176,35,2,76,0,0,238,128,192,35,2,0,238,165,235,240,30,221,228,125,4,0,238,161,255,240,101,64,1,19,202,64,2,19,250,64,3,20,134,64,4,21,2,64,5,21,106,0,254,0,224,109,6,110,2,166,147,34,156,109,12,110,12,166,161,34,156,109,12,110,17,166,173,34,156,35,150,96,166,97,139,98,1,18,16,0,254,0,224,109,7,110,2,166,191,34,156,109,15,110,12,166,205,34,156,109,15,110,17,166,215,34,156,35,150,96,166,97,183,98,1,18,16,0,254,0,224,109,10,110,2,166,234,34,156,109,18,110,12,166,246,34,156,109,18,110,17,166,255,34,156,35,150,96,166,97,226,98,1,18,16,106,50,107,27,167,42,218,180,106,58,167,46,218,180,0,238,167,41,96,0,240,85,19,74,167,41,96,1,240,85,19,74,167,41,240,101,64,0,19,112,21,2,167,41,240,101,64,0,20,134,21,106,0,224,167,8,96,46,97,11,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,11,208,24,0,251,0,251,0,251,167,32,96,28,97,0,208,24,0,198,20,58,0,224,167,8,96,46,97,11,208,24,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,11,208,24,0,251,0,251,0,251,0,251,0,251,0,251,167,32,96,28,97,0,208,24,0,204,167,40,96,21,97,33,98,27,99,26,100,15,101,4,208,49,209,49,208,65,209,65,210,81,112,1,113,1,114,1,48,31,20,72,96,20,97,31,98,32,99,43,100,26,101,37,102,16,103,5,208,97,209,97,210,97,211,97,212,113,213,113,118,1,119,1,54,26,20,108,240,10,34,2,19,12,0,224,0,255,167,8,96,78,97,22,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,42,97,22,208,24,0,251,0,251,0,251,167,32,96,60,97,11,208,24,0,204,167,40,96,53,97,65,98,59,99,43,100,32,101,21,208,49,209,49,208,65,209,65,210,81,112,1,113,1,114,1,48,63,20,196,96,52,97,63,98,64,99,75,100,58,101,69,102,33,103,22,208,97,209,97,210,97,211,97,212,113,213,113,118,1,119,1,55,32,20,232,240,10,34,2,19,12,0,224,167,8,96,45,97,23,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,12,208,24,0,251,0,251,0,251,167,24,96,22,97,23,208,24,0,220,167,32,96,33,97,0,208,24,0,198,167,40,96,21,97,26,98,15,99,4,208,17,208,33,208,49,112,1,48,42,21,68,96,20,97,31,98,42,99,5,208,49,209,49,210,49,115,1,51,26,21,88,240,10,34,2,19,12,0,224,0,255,167,8,96,77,97,46,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,42,97,35,208,24,0,251,0,251,0,251,167,24,96,54,97,46,208,24,0,220,0,220,167,32,96,65,97,11,208,24,0,204,167,40,96,53,97,21,98,32,99,43,208,17,208,33,208,49,112,1,48,74,21,176,96,52,97,63,98,74,99,22,208,49,209,49,210,49,115,1,51,43,21,196,240,10,34,2,19,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,192,160,192,128,160,64,160,224,160,160,224,192,64,64,224,224,32,192,224,224,96,32,224,160,224,32,32,224,192,32,192,224,128,224,224,224,32,32,32,224,224,160,224,224,224,32,224,64,160,224,160,192,224,160,224,224,128,128,224,192,160,160,192,224,192,128,224,224,128,192,128,96,128,160,96,160,224,160,160,224,64,64,224,96,32,32,192,160,192,160,160,128,128,128,224,224,224,160,160,192,160,160,160,224,160,160,224,192,160,192,128,64,160,224,96,192,160,192,160,96,192,32,192,224,64,64,64,160,160,160,96,160,160,160,64,160,160,224,224,160,64,160,160,160,160,64,64,224,96,128,224,0,0,0,0,0,224,0,0,0,0,0,64,8,13,3,166,8,18,3,174,104,76,52,84,148,104,88,44,120,64,100,112,92,0,8,148,116,124,104,60,112,52,72,76,104,0,12,148,136,100,152,52,72,76,104,0,11,13,3,182,11,18,3,192,104,76,52,84,148,116,52,112,148,116,76,144,60,0,8,148,88,100,132,148,112,60,116,0,12,148,72,76,68,72,148,112,60,116,0,14,13,3,202,14,18,3,250,104,76,52,84,148,120,44,112,68,60,120,0,8,148,92,100,56,60,112,96,0,12,148,88,60,68,44,52,140,0,255,231,207,129,129,207,231,255,255,231,243,129,129,243,231,255,255,231,195,129,165,231,231,255,255,231,231,165,129,195,231,255,128,0,10,174,162,66,56,8,48,184
+		ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 CHIP_ROM_END:
 
 ; CHIP_ROM: ; quirks test

@@ -618,14 +618,15 @@ Case0:
 	jr z, OP_00EE
 	cp $E0
 	jr z, OP_00E0
-	cp $FB
+	sub $FB
 	jp z, OP_00FB
-	cp $FC
+	dec a ; $FC
 	jp z, OP_00FC
-	cp $FE
+	sub 2 ; $FE
 	jp z, OP_00FE
-	cp $FF
+	dec a ; $FF
 	jp z, OP_00FF
+	ld a, NN
 	and $F0
 	cp $C0
 	jp z, OP_00CN
@@ -675,7 +676,9 @@ OP_00E0:
 
 ; \1 = 0 - left, otherwise right.
 MACRO SCROLL_HORIZONTAL 
-	ld b, b
+	ld a, 1
+	ldh [DRAW_FLAG], a
+
 	IF \1 == 0
 		ld hl, SCREEN_BUF
 		ld de, SCREEN_BUF + 128
@@ -688,6 +691,9 @@ MACRO SCROLL_HORIZONTAL
 	ldh a, [HIGH_RES_MODE_FLAG]
 	and a
 	jp nz, .highResMode\@
+	ld a, [IS_LEGACY_SCHIP]
+	and a
+	jp nz , .highResMode\@
 
 .moveTile\@:
 	REPT 7
@@ -797,7 +803,6 @@ MACRO SCROLL_HORIZONTAL
 	dec c
 	jr nz, .clearHalfTile\@
 
-	ld b, b
 	jp InstrEnd
 ENDM
 
@@ -808,6 +813,91 @@ OP_00FC: ; scroll left 4 pixels
 	SCROLL_HORIZONTAL(0)
 
 OP_00CN: ; scroll down N pixels
+	LD_N()
+	jp z, InstrEnd
+	ld b, a
+	; scroll twice as much in modern schip low-res mode
+	ldh a, [HIGH_RES_MODE_FLAG]
+	and a
+	jr nz, .skipAdd
+	ld a, [IS_LEGACY_SCHIP]
+	and a
+	jr nz, .skipAdd
+	ld a, b
+	add a
+	ld b, a
+.skipAdd:
+	; temp1, c = 64 - b (number of iterations per column)
+	ld a, b
+	cpl
+	add 64 + 1
+	ldh [temp1], a
+	ld c, a
+
+	ld hl, SCREEN_BUF + (128 * 16) - 2
+	; de = hl - (a * 2)
+	ld a, b
+	ldh [temp2], a ; saving N in temp2
+	add a  
+	ld b, a ; saving (a * 2) in b
+	ld a, l
+	sub b
+	ld d, h
+	ld e, a
+
+	ld a, 1
+	ldh [DRAW_FLAG], a 
+
+	REPT 16
+	.moveTile\@:
+		ld a, [de]
+		ld [hl-], a
+
+		dec l
+		dec de
+		dec e
+
+		dec c
+		jr nz, .moveTile\@
+
+		; src ptr (de) now points to the end of the new column, so set hl to it.
+		ld h, d
+		ld l, e
+
+		; subtracting bytes per iteration from e to move src ptr to the correct position in the new column.
+		ld a, e
+		sub b
+		ld e, a
+
+		; reloading c
+		ldh a, [temp1]
+		ld c, a
+	ENDR
+
+	; clearing first N rows:
+
+	ld hl, SCREEN_BUF
+	ldh a, [temp2] ; saved N
+	ld b, a
+	; storing 128 - (b * 2) in de (number of bytes to the first row of the next column).
+	ld a, 128
+	sub b
+	sub b
+	ld d, 0
+	ld e, a
+
+	xor a
+	REPT 16
+		ld c, b
+	.clearTile\@:
+		ld [hl+], a
+		inc l
+		dec c
+		jr nz, .clearTile\@
+		; moving to the next horizontal tile:
+		add hl, de
+	ENDR
+
 	jp InstrEnd
 
 OP_00FE:
@@ -1562,10 +1652,6 @@ FX0A_KEY_MAP: ; The opposite (gb key bits as indexes to chip8 keys)
 	db 4 ; dpad left
 	db 3 ; dpad up
 	db 0 ; dpad down
-INITIAL_IPF_PER_BLOCK:
-	db 173
-IPF_BLOCKS_NUM:
-	db 2
 CHIP8_FONT:
 	db $F0, $90, $90, $90, $F0, ; 0
 	db $20, $60, $20, $20, $70, ; 1
@@ -1584,6 +1670,13 @@ CHIP8_FONT:
 	db $F0, $80, $F0, $80, $F0, ; E
 	db $F0, $80, $F0, $80, $80  ; F
 CHIP8_FONT_END:
+INITIAL_IPF_PER_BLOCK:
+	db 173
+IPF_BLOCKS_NUM:
+	db 2
+IS_LEGACY_SCHIP:
+	db 0
+
 ; CHIP_ROM: ; 1dcell
 ; 	db 18, 138, 128, 124, 1, 109, 0, 34, 33, 104, 1, 57, 0, 34, 67, 136, 162, 56,
 ; 	db 0, 221, 193, 125, 1, 61, 64, 18, 7, 123, 1, 109, 0, 0, 238, 105, 0, 128,

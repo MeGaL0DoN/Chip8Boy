@@ -137,7 +137,7 @@ UpdateKeys:
 
 SECTION "RNG", WRAM0
 RNG_STATE:
-	 ds 4
+	ds 4
 
 ; Taken from: https://gbdev.io/gb-asm-tutorial/cheatsheet.html#generate-random-numbers
 MACRO RAND ; RNG_STATE -> bc

@@ -135,6 +135,26 @@ UpdateKeys:
   	ldh [rP1], a
 	ret
 
+SECTION "RNG", WRAM0
+RNG_STATE:
+	 ds 4
+
+; Taken from: https://gbdev.io/gb-asm-tutorial/cheatsheet.html#generate-random-numbers
+MACRO RAND ; RNG_STATE -> bc
+	ld hl, RNG_STATE
+  	ld a, [hl]
+  	add $B3
+  	ld [hl+], a
+  	adc [hl]
+  	ld [hl+], a
+  	adc a, [hl]
+  	ld [hl+], a
+  	ld c, a
+  	adc [hl]
+  	ld [hl], a
+  	ld b, a
+ENDM
+
 MACRO START_GDMA ; \1: destination; \2: source; \3: number of bytes
 	ld hl, rHDMA1
 	ld a, HIGH(\2)

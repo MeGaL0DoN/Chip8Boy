@@ -756,7 +756,8 @@ MACRO SCROLL_HORIZONTAL
 	dec c
 	jr nz, .clearTile\@
 
-	INSTR_END()
+	; early instruction loop break, because scroll takes big part of the frame.
+	jp InstrLoopEnd
 
 .highResMode\@:
 	REPT 8
@@ -813,7 +814,7 @@ MACRO SCROLL_HORIZONTAL
 	dec c
 	jr nz, .clearHalfTile\@
 
-	INSTR_END()
+	jp InstrLoopEnd
 ENDM
 
 OP_00FB: ; scroll right 4 pixels 
@@ -824,7 +825,7 @@ OP_00FC: ; scroll left 4 pixels
 
 OP_00CN: ; scroll down N pixels
 	LD_N()
-	jp z, .end
+	jp z, .scroll0
 	ld b, a
 	; scroll twice as much in modern schip low-res mode
 	ldh a, [HIGH_RES_MODE_FLAG]
@@ -907,7 +908,11 @@ OP_00CN: ; scroll down N pixels
 		; moving to the next horizontal tile:
 		add hl, de
 	ENDR
-.end:
+
+	; early instruction loop break, because scroll takes big part of the frame.
+	jp InstrLoopEnd
+
+.scroll0:
 	INSTR_END()
 
 ; Toggling high res flag on/off and rewriting jump table entry for DXYN to point to the new version.

@@ -559,17 +559,16 @@ InstrLoop:
 	; loading chip8 PC to HL
 	pop hl
 
-	; loading chip8 instruction to DE (pc is also incremented by 2)
+	; loading chip8 instruction to DE and incrementing pc by 2
 	ld a, [hl+]
 	ld d, a
-	ld a, [hl+]
-	ld e, a
+	ld e, [hl]
+	inc hl
 
 	; storing PC back
 	push hl
 
 	; jumping to opcode handler based on the first opcode nibble.
-	ld a, d
 	and $F0
 	swap a
 	JP_TABLE(MAIN_JUMP_TABLE)
@@ -1000,8 +999,9 @@ OP_5XY0:
 
 Case6:
 OP_6XNN:
-	LD_VX_PTR_HL()
-	ld [hl], NN
+	LD_VX_PTR_C()
+	ld a, NN
+	ldh [c], a
 
 	jp InstrEnd
 
@@ -1167,7 +1167,7 @@ OP_DXYN:
 
 		cp $80
 		jr nz, .regularDraw\@
-		DXYN_PROCESS_PIXEL 7, \1, \2 ; single pixel draw
+		DXYN_PROCESS_PIXEL 7, \1, \2 ; single-pixel draw
 		IF \2 == 0
 			DXYN_CHECK_LOOP .heightLoop\@, \1
 		ELSE
@@ -1212,6 +1212,27 @@ OP_DXYN:
     	ENDC
 	ENDM
 
+	; \1 - 1 if superchip hi-res, 0 if not, \2 - 1 if need to save Y in temp2, 0 if not.
+	MACRO LOAD_Y
+		LD_VY()
+		IF \1 == 0
+			and CHIP_SCR_HEIGHT - 1
+		ELSE
+			and SCHIP_SCR_HEIGHT - 1
+		ENDC
+		IF \2 != 0
+			ldh [temp2], a
+		ENDC
+
+		; add y * 2 to screen buf addr in hires, y * 4 in lores
+		add a
+		IF \1 == 0
+			add a
+		ENDC
+		add l
+		ld l, a
+	ENDM
+
 	; \1 - 1 if superchip hi-res, 0 if not
 	MACRO DXYN
 		LD_VX()
@@ -1230,35 +1251,25 @@ OP_DXYN:
 		ld h, [hl]
 		ld l, a
 
-		LD_VY()
-		IF \1 == 0
-			and CHIP_SCR_HEIGHT - 1
-		ELSE
-			and SCHIP_SCR_HEIGHT - 1
-		ENDC
-		ldh [temp2], a
-
-		; add y * 2 to screen buf addr in hires, y * 4 in lores
-		add a
-		IF \1 == 0
-			add a
-		ENDC
-		add l
-		ld l, a
-
-		; loading sprite addr to bc
-		LD_I_MEM_PTR b, c
-
 		xor a
 		ldh [VF], a
 
 		LD_N()
+		dec a ; check if N == 1 
+		jp nz, .regularDraw\@
+		LOAD_Y \1, 0
+		LD_I_MEM_PTR b, c 
+		DRAW_SPRITE \1, 1, 0 ; 8x1 (single row) draw
+	.regularDraw\@:
+		inc a
+		ld b, a ; saving height in b
+		LOAD_Y \1, 1
+		ld e, b
+		LD_I_MEM_PTR b, c
+		ld a, e
+		and a
 		jp z, .draw16x16\@
-		cp 1
-		jp z, .draw8x1\@
-		DRAW_SPRITE \1, 0, 0
-	.draw8x1\@:
-		DRAW_SPRITE \1, 1, 0
+		DRAW_SPRITE \1, 0, 0 
 	.draw16x16\@:
 		ld a, 16
 		DRAW_SPRITE \1, 0, 1
@@ -1356,14 +1367,15 @@ _8XY3:
 
 	jp InstrEnd
 
+; \1 = 0  - inverse carry (used for subtractions), 1 is regular carry.
 MACRO SET_VF_CARRY
-	IF \1 == 1 ; 1 is regular carry, 0 inverse carry (used for subtractions)
+	IF \1 == 0
 		sbc a
-		and $1
+		inc a
 		ldh [VF], a
 	ELSE
 		sbc a
-		inc a
+		and $1
 		ldh [VF], a
 	ENDC
 ENDM
@@ -1691,7 +1703,7 @@ CHIP8_FONT:
 	db $F0, $80, $F0, $80, $80  ; F
 CHIP8_FONT_END:
 INITIAL_IPF_PER_BLOCK:
-	db 176
+	db 197
 IPF_BLOCKS_NUM:
 	db 2
 IS_LEGACY_SCHIP:

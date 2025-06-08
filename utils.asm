@@ -147,3 +147,15 @@ MACRO START_GDMA ; \1: destination; \2: source; \3: number of bytes
 	ld [hl+], a
 	ld [hl], (\3 >> 4) - 1
 ENDM
+
+; \1 - table address, 256 byte aligned. index is passed in 'a'.
+MACRO JP_TABLE ; 
+	add a
+	ld h, HIGH(\1)
+	ld l, a
+
+	ld a, [hl+]
+	ld h, [hl]
+	ld l, a
+	jp hl
+ENDM

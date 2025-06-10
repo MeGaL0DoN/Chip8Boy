@@ -127,6 +127,8 @@ CHIP_SP:
 	ds 1
 I_REG:
 	ds 2
+SCHIP_RPL_FLAGS:
+	ds 8
 DELAY_TIMER:
 	ds 1
 SOUND_TIMER:
@@ -827,7 +829,7 @@ OP_00CN: ; scroll down N pixels
 	LD_N()
 	jp z, .scroll0
 	ld b, a
-	; scroll twice as much in modern schip low-res mode
+	; scroll twice as much in modern schip lores mode
 	ldh a, [HIGH_RES_MODE_FLAG]
 	and a
 	jr nz, .skipAdd
@@ -915,23 +917,37 @@ OP_00CN: ; scroll down N pixels
 .scroll0:
 	INSTR_END()
 
-; Toggling high res flag on/off and rewriting jump table entry for DXYN to point to the new version.
+; \1 - 0 is lores, 1 is hires
+MACRO CHANGE_RES_MODE
+	IF \1 == 0
+		xor a
+	ELSE
+		ld a, 1
+	ENDC
+	ldh [HIGH_RES_MODE_FLAG], a
+
+	; rewriting jump table entry for DXYN to point to the new version.
+	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
+	IF \1 == 0
+		ld a, LOW(DXYN_LOW_RES)
+		ld [hl+], a
+		ld [hl], HIGH(DXYN_LOW_RES)
+	ELSE
+		ld a, LOW(DXYN_HIGH_RES)
+		ld [hl+], a
+		ld [hl], HIGH(DXYN_HIGH_RES)
+	ENDC
+
+	ld a, [IS_LEGACY_SCHIP]
+	and a
+	jp z, OP_00E0 ; legacy schip doesn't clear screen on mode changes
+	INSTR_END()
+ENDM
+
 OP_00FE:
-	xor a
-	ldh [HIGH_RES_MODE_FLAG], a
-	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
-	ld a, LOW(DXYN_LOW_RES)
-	ld [hl+], a
-	ld [hl], HIGH(DXYN_LOW_RES)
-	jp OP_00E0 ; clear screen
+	CHANGE_RES_MODE(0)
 OP_00FF:
-	ld a, 1
-	ldh [HIGH_RES_MODE_FLAG], a
-	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
-	ld a, LOW(DXYN_HIGH_RES)
-	ld [hl+], a
-	ld [hl], HIGH(DXYN_HIGH_RES)
-	jp OP_00E0
+	CHANGE_RES_MODE(1)
 
 Case1: 
 OP_1NNN:
@@ -1081,17 +1097,17 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	; \1 - pixel bit, \2 - 1 if superchip hi-res, 0 if not, \3 - 1 if it's the last call in this dxyn, 0 if not.
+	; \1 - 1 if superchip hires, 0 if not; \2 - 1 if shoud load x offset, 0 if not; \3 - 0 if need to preserve hl, 1 if not.
 	MACRO DXYN_PROCESS_PIXEL 
-		IF \1 == 7
+		IF \2 != 0
 			ld a, d ; X
-			IF \2 == 0
+			IF \1 == 0
 				and $3
 			ELSE
 				and $7
 			ENDC
 		ENDC
-		IF \2 == 0
+		IF \1 == 0
 			add LOW(DXYN_LORES_MASK_LOOKUP)
 		ELSE
 			add LOW(DXYN_HIRES_MASK_LOOKUP)
@@ -1114,7 +1130,7 @@ OP_DXYN:
 		ld a, c
 		xor b
 		; if superchip high-res is not active then write the byte again to hl + 2, since framebuf is double scaled.
-		IF \2 == 0 
+		IF \1 == 0 
 			ld [hl+], a
 			inc l
 			ld [hl-], a
@@ -1132,7 +1148,7 @@ OP_DXYN:
 		INSTR_END()
 	ENDM
 
-	; \1 - loop label, \2 - 1 if superchip hi-res, 0 if not.
+	; \1 - loop label; \2 - 1 if superchip hires, 0 if not.
 	MACRO DXYN_CHECK_LOOP
 		pop bc
 		ldh a, [temp2] ; Y
@@ -1159,31 +1175,38 @@ OP_DXYN:
 		DXYN_FINISH()
 	ENDM
 
-	; \1 - 1 if superchip hi-res, 0 if not, \2 - 1 if no loop is needed (height is 1), 0 otherwise
-	; \3 - 1 if 16x16 sprite, 0 if 8xN
+	; \1 - 1 if superchip hires, 0 if not; \2 - height or -1 if not known at compile time
 	MACRO DRAW_SPRITE
 	.heightLoop\@:
-		IF \2 == 0
-			ld a, [bc]
+		ld a, [bc]
+		IF \2 != 1
 			inc bc
+			IF \2 == 16
+				ld e, a
+				ld a, [bc]
+				ldh [temp3], a ; saving second byte
+				inc bc
+			ENDC
 			push bc
-		ELSE
-			ld a, [bc]
 		ENDC
 
-		cp $80
-		jr nz, .regularDraw\@
-		DXYN_PROCESS_PIXEL 7, \1, \2 ; single-pixel draw
-		IF \2 == 0
-			DXYN_CHECK_LOOP .heightLoop\@, \1
-		ELSE
-			DXYN_FINISH()
-		ENDC		
+		IF \2 != 16
+			cp $80
+			jr nz, .regularDraw\@
+			DXYN_PROCESS_PIXEL \1, 1, \2 == 1 ; single-pixel draw
+			IF \2 == 1
+				DXYN_FINISH()
+			ELSE
+				DXYN_CHECK_LOOP .heightLoop\@, \1
+			ENDC		
+		ENDC
 
     REDEF xClipLabel EQUS ".xClip\@"
 
 	.regularDraw\@:
-		ld e, a
+		IF \2 != 16 ; otherwise, it was already saved to e
+			ld e, a
+		ENDC
 		push hl
     	FOR i, 7, -1, -1
 			IF i != 7
@@ -1205,20 +1228,47 @@ OP_DXYN:
 		.noOffset\@:
        		bit i, e
         	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL i, \1, i == 0
+        	DXYN_PROCESS_PIXEL \1, i == 7, (i == 0 && \2 != 16)
     	.skipPixel\@:
     	ENDR
 
+	IF \2 == 16 ; 16x16
+		ldh a, [temp3] ; loading second column
+		ld e, a
+
+		FOR i, 7, -1, -1
+			ld a, d
+			add (15 - i)
+			IF \1 == 0
+				cp CHIP_SCR_WIDTH
+				jp z, xClipLabel
+				and $3
+			ELSE
+				cp SCHIP_SCR_WIDTH
+				jp z, xClipLabel
+				and $7
+			ENDC
+			jr nz, .noOffset\@
+			ld bc, 128
+			add hl, bc
+		.noOffset\@:
+       		bit i, e
+        	jr z, .skipPixel\@
+        	DXYN_PROCESS_PIXEL \1, 0, i == 0
+    	.skipPixel\@:
+    	ENDR
+	ENDC
+
  	{xClipLabel}:
 		pop hl
-    	IF \2 == 0
-        	DXYN_CHECK_LOOP .heightLoop\@, \1
+    	IF \2 == 1
+		    DXYN_FINISH()
     	ELSE
-        	DXYN_FINISH()
+		    DXYN_CHECK_LOOP .heightLoop\@, \1
     	ENDC
 	ENDM
 
-	; \1 - 1 if superchip hi-res, 0 if not, \2 - 1 if need to save Y in temp2, 0 if not.
+	; \1 - 1 if superchip hires, 0 if not; \2 - 1 if need to save Y in temp2, 0 if not.
 	MACRO LOAD_Y
 		LD_VY()
 		IF \1 == 0
@@ -1238,12 +1288,12 @@ OP_DXYN:
 		add l
 		ld l, a
 
-		; reset VF (both vX and vY are fetched now)
+		; reset VF (both VX and VY are fetched now)
 		xor a
 		ldh [VF], a
 	ENDM
 
-	; \1 - 1 if superchip hi-res, 0 if not
+	; \1 - 1 if superchip hires, 0 if not
 	MACRO DXYN
 		LD_VX()
 		IF \1 == 0
@@ -1266,21 +1316,26 @@ OP_DXYN:
 		jp nz, .regularDraw\@
 		LOAD_Y \1, 0
 		LD_I_MEM_PTR b, c 
-		DRAW_SPRITE \1, 1, 0 ; 8x1 (single row) draw
+		DRAW_SPRITE \1, 1 ; 8x1 (single row) draw
 	.regularDraw\@:
 		inc a
 		jp z, .draw16x16\@
 		ldh [temp1], a ; saving height in temp1
 		LOAD_Y \1, 1
 		LD_I_MEM_PTR b, c
-		DRAW_SPRITE \1, 0, 0 
+	.draw8xN\@:
+		DRAW_SPRITE \1, -1 
 	.draw16x16\@:
-		ld b, b ; TODO
 		ld a, 16
 		ldh [temp1], a
 		LOAD_Y \1, 1
 		LD_I_MEM_PTR b, c
-		DRAW_SPRITE \1, 0, 1
+		IF \1 == 0 ; legacy schip draws 8x16 instead of 16x16 in lores mode
+			ld a, [IS_LEGACY_SCHIP]
+			and a
+			jp nz, .draw8xN\@
+		ENDC
+		DRAW_SPRITE \1, 16
 	ENDM
 
 DXYN_LOW_RES:
@@ -1325,8 +1380,13 @@ OP_EXA1:
 	
 CaseF:
 	ld a, NN
-	and $7F
+	bit 7, a
+	jr nz, .bit7Set
 	JP_TABLE(FXJumpTable)
+.bit7Set:
+	cp $85
+	jp z, FX85
+	jp InvalidInstr
 
 SECTION "8XY Jump Table", ROM0, ALIGN[8] 
 _8XYJumpTable:
@@ -1436,7 +1496,7 @@ _8XYE:
 	SET_VF_CARRY(1)
 	INSTR_END()
 
-; Matching on both lower nibbles of the instruction, 128 entries (byte is masked with $7F)
+; Matching on 7 low bits of the instruction, so 128 entries fit in a page.
 SECTION "FX Jump Table", ROM0, ALIGN[8]
 FXJumpTable:
 	ds 14, LOW(InvalidInstr), HIGH(InvalidInstr) ; $00-$06
@@ -1459,7 +1519,9 @@ FXJumpTable:
     dw FX55 ; $55
     ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $56-$64
     dw FX65 ; $65
-    ds 52, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$7F
+	ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$74
+	dw FX75 ; $75
+    ds 20, LOW(InvalidInstr), HIGH(InvalidInstr) ; $76-$7F
 
 FX07:
 	LD_VX_PTR_C()
@@ -1595,25 +1657,25 @@ FX33:
 .end:
 	INSTR_END()
 
-MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
+MACRO REG_STORE ; \1 = 0 - load from ram, else, store to ram.
 	LD_X()
-	ld e, a ; Number of registers to store
-	inc e; V[x] is included
+	ld b, a 
+	inc b ; v[x] is included
 
 	LD_I_MEM_PTR h, l
 	ld c, LOW(V0)
 .copyLoop\@
-	IF \1 == 1
+	IF \1 == 0
+		ld a, [hl+]
+		ldh [c], a
+	ELSE
 		CHECK_MEM_WRITE_OOB(.end\@)
 		ldh a, [c]
 		ld [hl+], a
-	ELSE
-		ld a, [hl+]
-		ldh [c], a
 	ENDC
 
 	inc c
-	dec e
+	dec b
 	jr nz, .copyLoop\@
 
 	; memory increment quirk:
@@ -1625,15 +1687,44 @@ MACRO REG_STORE ; If first parameter is 1, store to ram. Else, load from ram.
 	and $F ; keep within $FFF
 	ldh [I_REG + 1], a
 .end\@:
+	INSTR_END()
 ENDM
 
 FX55: 
 	REG_STORE(1)
-	INSTR_END()
 
 FX65: 
 	REG_STORE(0)
+
+MACRO SCHIP_RPL_STORE ; \1 = 0 - load from flags, else, store to flags.
+	LD_VX()
+	and $7
+	ld b, a
+	inc b ; v[x] is included
+
+	ld hl, SCHIP_RPL_FLAGS
+	ld c, LOW(V0)
+.copyLoop\@
+	IF \1 == 0
+		ld a, [hl+]
+		ldh [c], a
+	ELSE
+		ldh a, [c]
+		ld [hl+], a
+	ENDC
+
+	inc c
+	dec b
+	jr nz, .copyLoop\@
+
 	INSTR_END()
+ENDM
+
+FX75:
+	SCHIP_RPL_STORE(1)
+
+FX85:
+	SCHIP_RPL_STORE(0)
 
 ; Tile $0, used for background around the 128x64 screen 
 SECTION "VRAMBGTile", VRAM[$8000]
@@ -1694,16 +1785,16 @@ TILE_MAP_END:
 
 SECTION "Settings", ROMX[$4000]
 KEY_MAP:
-	db PADF_DOWN
+	db -1
 	db PADF_B
 	db PADF_A
+	db PADF_DOWN
+	db -1
+	db -1
 	db PADF_UP
 	db PADF_LEFT
 	db -1
 	db PADF_RIGHT
-	db -1
-	db -1
-	db -1
 	db -1
 	db -1
 	db -1
@@ -1715,10 +1806,10 @@ FX0A_KEY_MAP: ; The opposite (gb key bits as indexes to chip8 keys)
 	db 1 ; B
 	db -1 ; start, unused
 	db -1 ; select, unused
-	db 6 ; dpad right
-	db 4 ; dpad left
-	db 3 ; dpad up
-	db 0 ; dpad down
+	db 9 ; dpad right
+	db 7 ; dpad left
+	db 6 ; dpad up
+	db 3 ; dpad down
 CHIP8_FONT:
     db $60, $A0, $A0, $A0, $C0, ; 0
     db $40, $C0, $40, $40, $E0, ; 1
@@ -1776,12 +1867,23 @@ CHIP_ROM: ; 1dcell
 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 CHIP_ROM_END:
 
+; CHIP_ROM: ; 16x16 lores test
+; 	db 0,255,34,20,34,26,34,26,34,32,34,26,96,1,240,21,34,66,18,6,99,0,100,0,0,238,162,74,211,64,0,238,96,8,224,158,18,40,116,1,96,5,224,158,18,48,116,255,96,7,224,158,18,56,115,255,96,9,224,158,18,64,115,1,0,238,240,7,48,0,18,66,0,238,227,199,128,1,153,193,9,20,9,200,9,84,157,193,128,1,128,1,131,57,41,32,17,56,41,40,131,185,128,1,227,199,63,127,127,127,240,99,224,99,192,99,192,99,202,99,192,127,209,127,206,99,192,99,192,99,224,99,240,99,127,127,63,127
+
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
+; CHIP_ROM_END:
+
+; CHIP_ROM: ; 16x16 hires test
+; 	db 0,255,34,20,34,26,34,26,34,32,34,26,96,1,240,21,34,66,18,6,99,0,100,0,0,238,162,74,211,64,0,238,96,8,224,158,18,40,116,1,96,5,224,158,18,48,116,255,96,7,224,158,18,56,115,255,96,9,224,158,18,64,115,1,0,238,240,7,48,0,18,66,0,238,227,199,128,1,153,193,9,20,9,200,9,84,157,193,128,1,128,1,131,57,41,32,17,56,41,40,131,185,128,1,227,199,63,127,127,127,240,99,224,99,192,99,192,99,202,99,192,127,209,127,206,99,192,99,192,99,224,99,240,99,127,127,63,127
+
+; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
+; CHIP_ROM_END:
+
 ; CHIP_ROM: ; HEX-MIX-V2.sc8
 ; 	db 96,1,110,5,111,7,34,100,49,0,18,40,204,63,205,31,111,60,143,197,79,0,124,252,111,27,143,213,79,0,125,251,207,15,255,41,220,213,18,66,204,127,205,63,111,119,143,197,79,0,124,248,111,53,143,213,79,0,125,246,207,15,255,48,220,218,63,0,18,72,18,4,254,24,129,4,129,2,111,7,34,100,0,224,254,24,65,0,0,254,49,0,0,255,254,24,0,224,18,4,255,21,255,7,63,0,18,102,0,238
 
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
-
 
 ; CHIP_ROM: ; sweetcopter
 ; 	db 18,182,255,7,63,0,18,2,111,2,255,21,0,238,163,89,96,88,97,8,208,16,112,16,48,168,18,20,0,238,163,57,77,3,163,25,104,0,218,176,136,241,162,217,76,1,162,249,96,16,128,183,218,0,136,241,0,238,224,161,0,238,105,0,0,238,96,6,57,0,18,58,224,158,0,238,105,1,96,255,141,3,125,1,0,238,123,255,96,63,128,178,64,0,119,1,0,238,96,1,140,3,34,86,192,1,64,1,34,86,138,212,34,66,0,238,96,56,97,18,163,121,208,16,111,6,239,158,18,126,208,16,0,238,111,16,255,24,255,21,0,252,0,251,0,251,0,252,255,7,63,0,18,140,162,214,247,51,242,101,241,48,96,55,97,30,208,26,242,48,112,9,208,26,111,6,239,158,18,176,0,224,0,255,106,56,107,48,109,3,105,0,103,0,34,14,34,30,34,116,34,30,34,98,34,30,56,0,18,134,34,2,18,200,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,122,94,137,145,240,15,1,128,1,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,14,240,49,12,62,252,1,128,1,128,0,0,7,192,24,48,32,8,35,184,68,68,72,138,72,2,72,2,52,68,35,184,48,8,75,244,72,20,48,24,17,32,15,192,3,224,12,24,16,4,29,196,34,34,81,18,64,18,64,18,34,44,29,196,16,12,47,146,40,18,24,12,4,136,3,240,255,255,0,0,195,195,126,126,60,60,60,60,60,60,126,126,255,255,0,0,255,255,0,0,0,0,0,0,0,0,0,0,63,252,127,254,255,255,240,15,240,15,243,255,240,127,240,127,243,255,240,15,240,15,255,255,127,254,63,252,0,192,0,128
@@ -1796,6 +1898,7 @@ CHIP_ROM_END:
 
 ; CHIP_ROM: ; schip scrolling test
 ; 		db 19,12,96,0,224,161,18,4,112,1,64,16,0,238,18,4,101,0,162,34,241,85,162,130,241,85,18,34,67,1,208,18,34,2,0,0,245,30,245,30,245,30,245,30,241,101,99,0,243,21,244,7,52,0,18,68,165,231,208,18,100,10,244,21,100,1,131,67,100,14,228,158,18,82,69,0,18,82,117,255,18,28,100,15,228,158,18,96,149,32,18,96,117,1,18,28,134,80,100,10,228,161,18,128,100,0,114,1,116,1,228,158,18,120,134,64,118,255,18,128,84,32,18,108,114,255,18,50,34,2,0,0,246,30,246,30,246,30,246,30,100,2,244,30,241,101,100,16,128,65,162,154,241,85,0,0,252,101,35,2,65,0,0,238,128,16,35,2,66,0,0,238,128,32,35,2,67,0,0,238,128,48,35,2,68,0,0,238,128,64,35,2,69,0,0,238,128,80,35,2,70,0,0,238,128,96,35,2,71,0,0,238,128,112,35,2,72,0,0,238,128,128,35,2,73,0,0,238,128,144,35,2,74,0,0,238,128,160,35,2,75,0,0,238,128,176,35,2,76,0,0,238,128,192,35,2,0,238,165,235,240,30,221,228,125,4,0,238,161,255,240,101,64,1,19,202,64,2,19,250,64,3,20,134,64,4,21,2,64,5,21,106,0,254,0,224,109,6,110,2,166,147,34,156,109,12,110,12,166,161,34,156,109,12,110,17,166,173,34,156,35,150,96,166,97,139,98,1,18,16,0,254,0,224,109,7,110,2,166,191,34,156,109,15,110,12,166,205,34,156,109,15,110,17,166,215,34,156,35,150,96,166,97,183,98,1,18,16,0,254,0,224,109,10,110,2,166,234,34,156,109,18,110,12,166,246,34,156,109,18,110,17,166,255,34,156,35,150,96,166,97,226,98,1,18,16,106,50,107,27,167,42,218,180,106,58,167,46,218,180,0,238,167,41,96,0,240,85,19,74,167,41,96,1,240,85,19,74,167,41,240,101,64,0,19,112,21,2,167,41,240,101,64,0,20,134,21,106,0,224,167,8,96,46,97,11,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,11,208,24,0,251,0,251,0,251,167,32,96,28,97,0,208,24,0,198,20,58,0,224,167,8,96,46,97,11,208,24,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,11,208,24,0,251,0,251,0,251,0,251,0,251,0,251,167,32,96,28,97,0,208,24,0,204,167,40,96,21,97,33,98,27,99,26,100,15,101,4,208,49,209,49,208,65,209,65,210,81,112,1,113,1,114,1,48,31,20,72,96,20,97,31,98,32,99,43,100,26,101,37,102,16,103,5,208,97,209,97,210,97,211,97,212,113,213,113,118,1,119,1,54,26,20,108,240,10,34,2,19,12,0,224,0,255,167,8,96,78,97,22,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,42,97,22,208,24,0,251,0,251,0,251,167,32,96,60,97,11,208,24,0,204,167,40,96,53,97,65,98,59,99,43,100,32,101,21,208,49,209,49,208,65,209,65,210,81,112,1,113,1,114,1,48,63,20,196,96,52,97,63,98,64,99,75,100,58,101,69,102,33,103,22,208,97,209,97,210,97,211,97,212,113,213,113,118,1,119,1,55,32,20,232,240,10,34,2,19,12,0,224,167,8,96,45,97,23,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,10,97,12,208,24,0,251,0,251,0,251,167,24,96,22,97,23,208,24,0,220,167,32,96,33,97,0,208,24,0,198,167,40,96,21,97,26,98,15,99,4,208,17,208,33,208,49,112,1,48,42,21,68,96,20,97,31,98,42,99,5,208,49,209,49,210,49,115,1,51,26,21,88,240,10,34,2,19,12,0,224,0,255,167,8,96,77,97,46,208,24,0,252,0,252,0,252,0,252,0,252,0,252,167,16,96,42,97,35,208,24,0,251,0,251,0,251,167,24,96,54,97,46,208,24,0,220,0,220,167,32,96,65,97,11,208,24,0,204,167,40,96,53,97,21,98,32,99,43,208,17,208,33,208,49,112,1,48,74,21,176,96,52,97,63,98,74,99,22,208,49,209,49,210,49,115,1,51,43,21,196,240,10,34,2,19,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,192,192,160,192,128,160,64,160,224,160,160,224,192,64,64,224,224,32,192,224,224,96,32,224,160,224,32,32,224,192,32,192,224,128,224,224,224,32,32,32,224,224,160,224,224,224,32,224,64,160,224,160,192,224,160,224,224,128,128,224,192,160,160,192,224,192,128,224,224,128,192,128,96,128,160,96,160,224,160,160,224,64,64,224,96,32,32,192,160,192,160,160,128,128,128,224,224,224,160,160,192,160,160,160,224,160,160,224,192,160,192,128,64,160,224,96,192,160,192,160,96,192,32,192,224,64,64,64,160,160,160,96,160,160,160,64,160,160,224,224,160,64,160,160,160,160,64,64,224,96,128,224,0,0,0,0,0,224,0,0,0,0,0,64,8,13,3,166,8,18,3,174,104,76,52,84,148,104,88,44,120,64,100,112,92,0,8,148,116,124,104,60,112,52,72,76,104,0,12,148,136,100,152,52,72,76,104,0,11,13,3,182,11,18,3,192,104,76,52,84,148,116,52,112,148,116,76,144,60,0,8,148,88,100,132,148,112,60,116,0,12,148,72,76,68,72,148,112,60,116,0,14,13,3,202,14,18,3,250,104,76,52,84,148,120,44,112,68,60,120,0,8,148,92,100,56,60,112,96,0,12,148,88,60,68,44,52,140,0,255,231,207,129,129,207,231,255,255,231,243,129,129,243,231,255,255,231,195,129,165,231,231,255,255,231,231,165,129,195,231,255,128,0,10,174,162,66,56,8,48,184
+
 ; 		ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
 
@@ -2043,7 +2146,6 @@ CHIP_ROM_END:
 	
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
-
 
 ; SECTION "Chip8 ROM", ROMX
 ; CHIP_ROM:

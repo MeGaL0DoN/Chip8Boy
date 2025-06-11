@@ -155,6 +155,18 @@ MACRO RAND ; RNG_STATE -> bc
   	ld b, a
 ENDM
 
+; \1 - table address, 256 byte aligned. index is passed in 'a'.
+MACRO JP_TABLE ; 
+	add a
+	ld h, HIGH(\1)
+	ld l, a
+
+	ld a, [hl+]
+	ld h, [hl]
+	ld l, a
+	jp hl
+ENDM
+
 MACRO START_GDMA ; \1: destination; \2: source; \3: number of bytes
 	ld hl, rHDMA1
 	ld a, HIGH(\2)
@@ -168,14 +180,9 @@ MACRO START_GDMA ; \1: destination; \2: source; \3: number of bytes
 	ld [hl], (\3 >> 4) - 1
 ENDM
 
-; \1 - table address, 256 byte aligned. index is passed in 'a'.
-MACRO JP_TABLE ; 
-	add a
-	ld h, HIGH(\1)
-	ld l, a
-
-	ld a, [hl+]
-	ld h, [hl]
-	ld l, a
-	jp hl
+MACRO WAIT_VRAM_ACCESS
+.wait\@
+	ldh a, [rSTAT]
+	bit 1, a
+	jr nz, .wait\@
 ENDM

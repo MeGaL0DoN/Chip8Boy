@@ -2,7 +2,7 @@ INCLUDE "hardware.inc"
 INCLUDE "utils.asm"
 
 ; TO COMPILE RUN:
-; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gbc chip8boy.o ; rgbfix -C -v -p 0xFF chip8boy.gbc
+; rgbasm -o chip8boy.o main.asm ; rgblink -o chip8boy.gbc chip8boy.o ; rgbfix -c -v -p 0xFF chip8boy.gbc
 
 MACRO LD_X
 	ld a, d
@@ -92,7 +92,7 @@ ENDM
 
 DEF CHIP_RAM_SIZE EQU 4096
 DEF CHIP_ROM_SIZE EQU (CHIP_RAM_SIZE - $200)
-DEF CHIP_RAM_DEADBUF_SIZE EQU 31
+DEF CHIP_RAM_DEADBUF_SIZE EQU 32
 DEF CHIP_SCR_WIDTH EQU 64
 DEF CHIP_SCR_HEIGHT EQU 32
 DEF SCHIP_SCR_WIDTH EQU 128
@@ -102,7 +102,8 @@ DEF SCREEN_BUF_SIZE EQU 2048
 DEF FX0A_NOT_ACTIVE_FLAG EQU -1
 DEF FX0A_DONE_FLAG EQU -2
 
-DEF DIGIT0_TILE_NUM EQU $81
+DEF BG_TILE_TILEMAP_NUM EQU $80
+DEF DIGIT0_TILE_NUM EQU BG_TILE_TILEMAP_NUM + 1
 DEF F_TILE_NUM EQU DIGIT0_TILE_NUM + 10
 DEF P_TILE_NUM EQU DIGIT0_TILE_NUM + 11
 DEF S_TILE_NUM EQU DIGIT0_TILE_NUM + 12
@@ -116,6 +117,8 @@ DEF IPF_DIGIT0_TILEMAP_NUM EQU 17
 DEF PAUSE_ICON_TILEMAP_NUM EQU 73
 
 SECTION "Variables", HRAM
+IS_GBC:
+	ds 1
 CHIP_STATE:
 V0:
 	ds 15
@@ -185,7 +188,7 @@ CHIP_RAM:
 	ds CHIP_RAM_SIZE
 CHIP_RAM_END:
 
-; These 31 bytes are always 0, and the purpose is to protect OOB memory reads (for example in dxyn) when I register is > $FFF,
+; These 32 bytes are always 0, and the purpose is to protect OOB memory reads (for example in dxyn) when I register is > $FFF,
 ; without having to mask it every time. since CHIP_RAM ends at DFFF, E000-FDFF is a mirror of C000 and will read from here.
 SECTION "ChipRAMDeadBuf", WRAM0[$C000]
 CHIP_RAM_DEAD_BUF:
@@ -195,21 +198,34 @@ SECTION "ChipScreenBuf", WRAM0, ALIGN[8]
 SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
 
-SECTION "VRAMScreenBuf", VRAM[$8010]
+SECTION "VRAMScreenBuf", VRAM[$8000]
 VRAM_SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
 
-SECTION "DXYNLoresLookup", ROMX, ALIGN[8]
-DXYN_LORES_BASE_ADDR_LOOKUP:
+SECTION "DXYNGBCLoresLookup", ROMX, ALIGN[8]
+DXYN_GBC_LORES_BASE_ADDR_LOOKUP:
 	FOR x, CHIP_SCR_WIDTH
 		db LOW((x / 4) * 128 + SCREEN_BUF)
 		db HIGH((x / 4) * 128 + SCREEN_BUF)
 	ENDR
-SECTION "DXYNHiresLookup", ROMX, ALIGN[8]
-DXYN_HIRES_BASE_ADDR_LOOKUP:
+SECTION "DXYNGBCHiresLookup", ROMX, ALIGN[8]
+DXYN_GBC_HIRES_BASE_ADDR_LOOKUP:
 	FOR x, SCHIP_SCR_WIDTH
 		db LOW((x / 8) * 128 + SCREEN_BUF)
 		db HIGH((x / 8) * 128 + SCREEN_BUF)
+	ENDR
+
+SECTION "DXYNDMGLoresLookup", ROMX, ALIGN[8]
+DXYN_DMG_LORES_BASE_ADDR_LOOKUP:
+	FOR x, CHIP_SCR_WIDTH
+		db LOW((x / 4) * 128 + VRAM_SCREEN_BUF)
+		db HIGH((x / 4) * 128 + VRAM_SCREEN_BUF)
+	ENDR
+SECTION "DXYNDMGHiresLookup", ROMX, ALIGN[8]
+DXYN_DMG_HIRES_BASE_ADDR_LOOKUP:
+	FOR x, SCHIP_SCR_WIDTH
+		db LOW((x / 8) * 128 + VRAM_SCREEN_BUF)
+		db HIGH((x / 8) * 128 + VRAM_SCREEN_BUF)
 	ENDR
 
 SECTION "DXYNMaskLookups", ROMX
@@ -315,7 +331,7 @@ PauseChip8: ; Waits for start or select press to resume.
 	jr z, .continueWait
 .end:
 	ld hl, ($98 << 8) | PAUSE_ICON_TILEMAP_NUM
-	xor a
+	ld a, BG_TILE_TILEMAP_NUM
 	ld [hl+], a
 	ld [hl], a
 	ret
@@ -366,13 +382,16 @@ VBlankHandler:
 	jr z, .droppedFrame  ; if didn't finish executing opcodes for this frame yet.
 	xor a
 	ldh [FRAME_DONE_FLAG], a
+	ldh a, [IS_GBC]
+	and a
+	jr z, .noFramebufCopy
 	ldh a, [DRAW_FLAG] 
 	and a
-	jr z, .noDraw
+	jr z, .noFramebufCopy
 	xor a
 	ldh [DRAW_FLAG], a
 	START_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
-.noDraw
+.noFramebufCopy:
 	ld hl, FRAME_COUNTER
 	dec [hl]
 	call z, SecondElapsed
@@ -407,13 +426,25 @@ VBlankHandler:
 	inc a
 	daa
 	ldh [DROPPED_FRAME_COUNTER], a
-	jr .noDraw
+	jr .noFramebufCopy
 
 SECTION "Header", ROM0[$100]
 	jr EntryPoint
 	ds $150 - @, 0 ; Make room for the header
 
 EntryPoint:
+	cp $11
+	jr nz, .noGBC
+	ld a, 1
+	jr .init
+.noGBC:
+	xor a
+.init:
+	ldh [IS_GBC], a
+
+	; set stack
+	ld sp, $D000
+
 	; disabling audio circuitry
 	xor a
 	ldh [rNR52], a
@@ -428,33 +459,19 @@ EntryPoint:
 	xor a
 	ldh [rLCDC], a
 
-	; enabling double speed mode
-	inc a
+	; GBC specifc initialization:
+	ldh a, [IS_GBC]
+	and a
+	jr z, .dmg
+	; double speed mode
 	ldh [rKEY1], a
 	stop
-
-	; set stack
-	ld sp, $D000
-
-	MEMCPY $9800, TILE_MAP, TILE_MAP_END
-	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
-
 	; set attribute map to zero (use palette 0 and tile bank 0, no flips)
 	set 0, a
 	ldh [rVBK], a
 	MEMSET $9800, 0, $400
 	xor a
 	ldh [rVBK], a
-
-	ld hl, VRAM_BG_TILE
-	ld b, $FF
-REPT 8
-	xor a
-	ld [hl+], a
-	ld a, b
-	ld [hl+], a
-ENDR
-	MEMCPY_1BIT_TILES VRAM_FONT_TILES, FONT_TILES, FONT_TILES_END
 
 	; setting palettes
 	ld a, $80
@@ -478,6 +495,23 @@ ENDR
 	ldh [c], a
 	ld a, $07
 	ldh [c], a
+	jr .after
+.dmg:
+	ld a, %01100011 ; id 3 = light gray, 2 = dark gray, 1 = white, 0 = black
+	ldh [rBGP], a	
+.after:
+	MEMCPY $9800, TILE_MAP, TILE_MAP_END
+	MEMCPY_1BIT_TILES VRAM_FONT_TILES, FONT_TILES, FONT_TILES_END
+	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
+
+	ld hl, VRAM_BG_TILE
+	ld b, $FF
+REPT 8
+	xor a
+	ld [hl+], a
+	ld a, b
+	ld [hl+], a
+ENDR
 
 	xor a
 	ldh [KEY_STATE], a
@@ -495,6 +529,15 @@ ENDR
 
 InitChip8:
 	MEMCPY MAIN_JUMP_TABLE, MAIN_JUMP_TABLE_ROM, MAIN_JUMP_TABLE_ROM_END
+	ldh a, [IS_GBC]
+	and a
+	jr nz, .after
+	; rewrite DXYN jump table entry to point to the DMG version, because GBC is default.
+	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
+	ld a, LOW(DXYN_LOW_RES_DMG)
+	ld [hl+], a
+	ld [hl], HIGH(DXYN_LOW_RES_DMG)
+.after:
 	MEMSET CHIP_RAM, 0, $200
 	MEMCPY CHIP_RAM, CHIP8_FONT, CHIP8_FONT_END
 	MEMCPY CHIP_RAM + (CHIP8_FONT_END - CHIP8_FONT), SCHIP_FONT, SCHIP_FONT_END
@@ -502,6 +545,7 @@ InitChip8:
 	MEMSET CHIP_RAM_DEAD_BUF, 0, CHIP_RAM_DEADBUF_SIZE
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
 	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
+	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	; reset chip8 PC
 	ld bc, CHIP_RAM + $200
@@ -512,6 +556,9 @@ InitChip8:
 
 	ld a, -1
 	ldh [FX0A_KEY_REG], a
+
+	ld a, 1
+	ldh [DRAW_FLAG], a
 
 	; setting IPF variables
 	ld a, [IPF_BLOCKS_NUM]
@@ -616,7 +663,7 @@ MAIN_JUMP_TABLE:
 SECTION "MainJumpTableROM", ROM0
 MAIN_JUMP_TABLE_ROM:
     dw Case0, Case1, Case2, Case3, Case4, Case5, Case6, Case7,
-    dw Case8, Case9, CaseA, CaseB, CaseC, DXYN_LOW_RES, CaseE, CaseF  
+    dw Case8, Case9, CaseA, CaseB, CaseC, DXYN_LOW_RES_GBC, CaseE, CaseF  
 MAIN_JUMP_TABLE_ROM_END:
 
 Case0:
@@ -665,6 +712,14 @@ OP_00EE:
 
 OP_00E0: 
 	ld hl, SCREEN_BUF
+	ldh a, [IS_GBC]
+	and a
+	jr nz, .after
+	ld hl, VRAM_SCREEN_BUF
+	halt ; wait for VBlank
+	ld a, [LCDCF_OFF]
+	ldh [rLCDC], a ; turn off LCD
+.after:
 	xor a
 	ld c, 8
 
@@ -683,6 +738,9 @@ OP_00E0:
 
 	inc a ; will become 1
 	ldh [DRAW_FLAG], a
+	; turning LCD back on for DMG
+	ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
+	ldh [rLCDC], a
 
 	INSTR_END()
 
@@ -928,16 +986,30 @@ MACRO CHANGE_RES_MODE
 
 	; rewriting jump table entry for DXYN to point to the new version.
 	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
+	ldh a, [IS_GBC]
+	and a
+	jr nz, .GBC\@
 	IF \1 == 0
-		ld a, LOW(DXYN_LOW_RES)
+		ld a, LOW(DXYN_LOW_RES_DMG)
 		ld [hl+], a
-		ld [hl], HIGH(DXYN_LOW_RES)
+		ld [hl], HIGH(DXYN_LOW_RES_DMG)
 	ELSE
-		ld a, LOW(DXYN_HIGH_RES)
+		ld a, LOW(DXYN_HIGH_RES_DMG)
 		ld [hl+], a
-		ld [hl], HIGH(DXYN_HIGH_RES)
+		ld [hl], HIGH(DXYN_HIGH_RES_DMG)
 	ENDC
-
+	jr .end\@
+.GBC\@:
+	IF \1 == 0
+		ld a, LOW(DXYN_LOW_RES_GBC)
+		ld [hl+], a
+		ld [hl], HIGH(DXYN_LOW_RES_GBC)
+	ELSE
+		ld a, LOW(DXYN_HIGH_RES_GBC)
+		ld [hl+], a
+		ld [hl], HIGH(DXYN_HIGH_RES_GBC)
+	ENDC
+.end\@:
 	ld a, [IS_LEGACY_SCHIP]
 	and a
 	jp z, OP_00E0 ; legacy schip doesn't clear screen on mode changes
@@ -1097,17 +1169,18 @@ OP_CXNN:
 
 CaseD: 
 OP_DXYN:
-	; \1 - 1 if superchip hires, 0 if not; \2 - 1 if shoud load x offset, 0 if not; \3 - 0 if need to preserve hl, 1 if not.
+	; \1 - 1 if running on GBC, 0 if not.
+	; \2 - 1 if superchip hires, 0 if not; \3 - 1 if shoud load x offset, 0 if not; \4 - 0 if need to preserve hl, 1 if not.
 	MACRO DXYN_PROCESS_PIXEL 
-		IF \2 != 0
+		IF \3 != 0
 			ld a, d ; X
-			IF \1 == 0
+			IF \2 == 0
 				and $3
 			ELSE
 				and $7
 			ENDC
 		ENDC
-		IF \1 == 0
+		IF \2 == 0
 			add LOW(DXYN_LORES_MASK_LOOKUP)
 		ELSE
 			add LOW(DXYN_HIRES_MASK_LOOKUP)
@@ -1116,6 +1189,11 @@ OP_DXYN:
 		ld c, a
 		ldh a, [c]
 		ld b, a ; saving mask in 'b'
+
+		; DMG, must wait for hblank/vblank so VRAM is accessible
+		IF \1 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
 
 		; loading and saving current screen buf byte in c
 		ld a, [hl]
@@ -1126,15 +1204,18 @@ OP_DXYN:
 		ld a, 1
 		ldh [VF], a
 	.noCollision\@:
+		IF \1 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
 		; drawing:
 		ld a, c
 		xor b
-		; if superchip high-res is not active then write the byte again to hl + 2, since framebuf is double scaled.
-		IF \1 == 0 
+		; if superchip hires is not active then write the byte again to hl + 2, since framebuf is double scaled.
+		IF \2 == 0 
 			ld [hl+], a
 			inc l
 			ld [hl-], a
-			IF \3 == 0
+			IF \4 == 0
 				dec l
 			ENDC
 		ELSE
@@ -1142,18 +1223,21 @@ OP_DXYN:
 		ENDC
 	ENDM
 
+	; \1 - 1 if running on GBC, 0 if not.
 	MACRO DXYN_FINISH
-		ld a, 1
-		ldh [DRAW_FLAG], a
+		IF \1 != 0
+			ld a, 1
+			ldh [DRAW_FLAG], a
+		ENDC
 		INSTR_END()
 	ENDM
 
-	; \1 - loop label; \2 - 1 if superchip hires, 0 if not.
+	; \1 - loop label; \2 - 1 if running on GBC, 0 if not; \3 - 1 if superchip hires, 0 if not.
 	MACRO DXYN_CHECK_LOOP
 		pop bc
 		ldh a, [temp2] ; Y
 		inc a
-		IF \2 == 0
+		IF \3 == 0
 			cp CHIP_SCR_HEIGHT
 		ELSE
 			cp SCHIP_SCR_HEIGHT
@@ -1163,7 +1247,7 @@ OP_DXYN:
 		; add 2 to screen buf pointer
 		inc l
 		inc l
-		IF \2 == 0 ; add 2 more (skip next row since in lores it already was writen to)
+		IF \3 == 0 ; add 2 more (skip next row since in lores it already was writen to)
 			inc l
 			inc l
 		ENDC
@@ -1172,16 +1256,17 @@ OP_DXYN:
 		ldh [temp1], a
 		jp nz, \1
 	.yClip\@:
-		DXYN_FINISH()
+		DXYN_FINISH(\2)
 	ENDM
 
-	; \1 - 1 if superchip hires, 0 if not; \2 - height or -1 if not known at compile time
+	; \1 - 1 if running on GBC, 0 if not.
+	; \2 - 1 if superchip hires, 0 if not; \3 - height or -1 if not known at compile time
 	MACRO DRAW_SPRITE
 	.heightLoop\@:
 		ld a, [bc]
-		IF \2 != 1
+		IF \3 != 1
 			inc bc
-			IF \2 == 16
+			IF \3 == 16
 				ld e, a
 				ld a, [bc]
 				ldh [temp3], a ; saving second byte
@@ -1190,21 +1275,21 @@ OP_DXYN:
 			push bc
 		ENDC
 
-		IF \2 != 16
+		IF \3 != 16
 			cp $80
 			jr nz, .regularDraw\@
-			DXYN_PROCESS_PIXEL \1, 1, \2 == 1 ; single-pixel draw
-			IF \2 == 1
-				DXYN_FINISH()
+			DXYN_PROCESS_PIXEL \1, \2, 1, \3 == 1 ; single-pixel draw
+			IF \3 == 1
+				DXYN_FINISH(\1)
 			ELSE
-				DXYN_CHECK_LOOP .heightLoop\@, \1
+				DXYN_CHECK_LOOP .heightLoop\@, \1, \2
 			ENDC		
 		ENDC
 
     REDEF xClipLabel EQUS ".xClip\@"
 
 	.regularDraw\@:
-		IF \2 != 16 ; otherwise, it was already saved to e
+		IF \3 != 16 ; otherwise, it was already saved to e
 			ld e, a
 		ENDC
 		push hl
@@ -1212,7 +1297,7 @@ OP_DXYN:
 			IF i != 7
 				ld a, d
 				add (7 - i)
-				IF \1 == 0
+				IF \2 == 0
 					cp CHIP_SCR_WIDTH
 					jp z, xClipLabel
 					and $3
@@ -1228,18 +1313,18 @@ OP_DXYN:
 		.noOffset\@:
        		bit i, e
         	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL \1, i == 7, (i == 0 && \2 != 16)
+        	DXYN_PROCESS_PIXEL \1, \2, i == 7, (i == 0 && \3 != 16)
     	.skipPixel\@:
     	ENDR
 
-	IF \2 == 16 ; 16x16
+	IF \3 == 16 ; 16x16
 		ldh a, [temp3] ; loading second column
 		ld e, a
 
 		FOR i, 7, -1, -1
 			ld a, d
 			add (15 - i)
-			IF \1 == 0
+			IF \2 == 0
 				cp CHIP_SCR_WIDTH
 				jp z, xClipLabel
 				and $3
@@ -1254,17 +1339,17 @@ OP_DXYN:
 		.noOffset\@:
        		bit i, e
         	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL \1, 0, i == 0
+        	DXYN_PROCESS_PIXEL \1, \2, 0, i == 0
     	.skipPixel\@:
     	ENDR
 	ENDC
 
  	{xClipLabel}:
 		pop hl
-    	IF \2 == 1
-		    DXYN_FINISH()
+    	IF \3 == 1
+		    DXYN_FINISH(\1)
     	ELSE
-		    DXYN_CHECK_LOOP .heightLoop\@, \1
+		    DXYN_CHECK_LOOP .heightLoop\@, \1, \2
     	ENDC
 	ENDM
 
@@ -1293,18 +1378,28 @@ OP_DXYN:
 		ldh [VF], a
 	ENDM
 
-	; \1 - 1 if superchip hires, 0 if not
+	; \1 - 1 if running on GBC, 0 if not. \2 - 1 if superchip hires, 0 if not
 	MACRO DXYN
 		LD_VX()
 		IF \1 == 0
-			and CHIP_SCR_WIDTH - 1
-			ld d, a
-			ld h, HIGH(DXYN_LORES_BASE_ADDR_LOOKUP)
+			IF \2 == 0
+				and CHIP_SCR_WIDTH - 1
+				ld h, HIGH(DXYN_DMG_LORES_BASE_ADDR_LOOKUP)
+			ELSE
+				and SCHIP_SCR_WIDTH - 1
+				ld h, HIGH(DXYN_DMG_HIRES_BASE_ADDR_LOOKUP)
+			ENDC
 		ELSE
-			and SCHIP_SCR_WIDTH - 1
-			ld d, a
-			ld h, HIGH(DXYN_HIRES_BASE_ADDR_LOOKUP)
+			IF \2 == 0
+				and CHIP_SCR_WIDTH - 1
+				ld h, HIGH(DXYN_GBC_LORES_BASE_ADDR_LOOKUP)
+			ELSE
+				and SCHIP_SCR_WIDTH - 1
+				ld h, HIGH(DXYN_GBC_HIRES_BASE_ADDR_LOOKUP)
+			ENDC
 		ENDC
+
+		ld d, a
 		add a ; x * 2 (each entry is 2 bytes)
 		ld l, a
 		ld a, [hl+]
@@ -1314,34 +1409,38 @@ OP_DXYN:
 		LD_N()
 		dec a ; check if N == 1 
 		jp nz, .regularDraw\@
-		LOAD_Y \1, 0
+		LOAD_Y \2, 0
 		LD_I_MEM_PTR b, c 
-		DRAW_SPRITE \1, 1 ; 8x1 (single row) draw
+		DRAW_SPRITE \1, \2, 1 ; 8x1 (single row) draw
 	.regularDraw\@:
 		inc a
 		jp z, .draw16x16\@
 		ldh [temp1], a ; saving height in temp1
-		LOAD_Y \1, 1
+		LOAD_Y \2, 1
 		LD_I_MEM_PTR b, c
 	.draw8xN\@:
-		DRAW_SPRITE \1, -1 
+		DRAW_SPRITE \1, \2, -1 
 	.draw16x16\@:
 		ld a, 16
 		ldh [temp1], a
-		LOAD_Y \1, 1
+		LOAD_Y \2, 1
 		LD_I_MEM_PTR b, c
-		IF \1 == 0 ; legacy schip draws 8x16 instead of 16x16 in lores mode
+		IF \2 == 0 ; legacy schip draws 8x16 instead of 16x16 in lores mode
 			ld a, [IS_LEGACY_SCHIP]
 			and a
 			jp nz, .draw8xN\@
 		ENDC
-		DRAW_SPRITE \1, 16
+		DRAW_SPRITE \1, \2, 16
 	ENDM
 
-DXYN_LOW_RES:
-	DXYN(0)
-DXYN_HIGH_RES:
-	DXYN(1)
+DXYN_LOW_RES_DMG:
+	DXYN 0, 0
+DXYN_HIGH_RES_DMG:
+	DXYN 0, 1
+DXYN_LOW_RES_GBC:
+	DXYN 1, 0
+DXYN_HIGH_RES_GBC:
+	DXYN 1, 1
 
 MACRO LD_KEY
 	LD_VX()
@@ -1726,12 +1825,9 @@ FX75:
 FX85:
 	SCHIP_RPL_STORE(0)
 
-; Tile $0, used for background around the 128x64 screen 
-SECTION "VRAMBGTile", VRAM[$8000]
-VRAM_BG_TILE:
+SECTION "VRAMTiles", VRAM[$8000 + SCREEN_BUF_SIZE]
+VRAM_BG_TILE: ; Tile $80, used for background around the 128x64 screen 
 	ds 16
-
-SECTION "VRAMTiles", VRAM[$8010 + SCREEN_BUF_SIZE]
 VRAM_FONT_TILES:
 
 SECTION "Tiles", ROMX
@@ -1757,30 +1853,32 @@ FONT_TILES_END:
 
 SECTION "TileMap", ROMX
 TILE_MAP:
-	db F_TILE_NUM, P_TILE_NUM, S_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
-	db 0,0,0,0,0,0,0
-	db I_TILE_NUM, P_TILE_NUM, F_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
-	db 0,0,0,0,0,0,0,0,0,0,0,0
-	REPT 4
-	REPT 32
-		db 0
-	ENDR
-	ENDR
+    db F_TILE_NUM, P_TILE_NUM, S_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
+    db $80,$80,$80,$80,$80,$80,$80
 
-	db 0,0, $01,$09,$11,$19,$21,$29,$31,$39,$41,$49,$51,$59,$61,$69,$71,$79, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $02,$0A,$12,$1A,$22,$2A,$32,$3A,$42,$4A,$52,$5A,$62,$6A,$72,$7A, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $03,$0B,$13,$1B,$23,$2B,$33,$3B,$43,$4B,$53,$5B,$63,$6B,$73,$7B, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $04,$0C,$14,$1C,$24,$2C,$34,$3C,$44,$4C,$54,$5C,$64,$6C,$74,$7C, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $05,$0D,$15,$1D,$25,$2D,$35,$3D,$45,$4D,$55,$5D,$65,$6D,$75,$7D, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $06,$0E,$16,$1E,$26,$2E,$36,$3E,$46,$4E,$56,$5E,$66,$6E,$76,$7E, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $07,$0F,$17,$1F,$27,$2F,$37,$3F,$47,$4F,$57,$5F,$67,$6F,$77,$7F, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	db 0,0, $08,$10,$18,$20,$28,$30,$38,$40,$48,$50,$58,$60,$68,$70,$78,$80, 0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    db I_TILE_NUM, P_TILE_NUM, F_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
+    db $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
 
-	REPT 5
-	REPT 32
-		db 0
-	ENDR
-	ENDR
+    REPT 4
+    REPT 32
+        db $80
+    ENDR
+    ENDR
+
+    db $80,$80, $00,$08,$10,$18,$20,$28,$30,$38,$40,$48,$50,$58,$60,$68,$70,$78, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $01,$09,$11,$19,$21,$29,$31,$39,$41,$49,$51,$59,$61,$69,$71,$79, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $02,$0A,$12,$1A,$22,$2A,$32,$3A,$42,$4A,$52,$5A,$62,$6A,$72,$7A, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $03,$0B,$13,$1B,$23,$2B,$33,$3B,$43,$4B,$53,$5B,$63,$6B,$73,$7B, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $04,$0C,$14,$1C,$24,$2C,$34,$3C,$44,$4C,$54,$5C,$64,$6C,$74,$7C, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $05,$0D,$15,$1D,$25,$2D,$35,$3D,$45,$4D,$55,$5D,$65,$6D,$75,$7D, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $06,$0E,$16,$1E,$26,$2E,$36,$3E,$46,$4E,$56,$5E,$66,$6E,$76,$7E, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+    db $80,$80, $07,$0F,$17,$1F,$27,$2F,$37,$3F,$47,$4F,$57,$5F,$67,$6F,$77,$7F, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
+
+    REPT 5
+    REPT 32
+        db $80
+    ENDR
+    ENDR
 TILE_MAP_END:
 
 SECTION "Settings", ROMX[$4000]
@@ -1847,7 +1945,7 @@ SCHIP_FONT:
     db $FE, $66, $62, $64, $7C, $64, $60, $60, $F0, $00, ; F
 SCHIP_FONT_END:
 INITIAL_IPF_PER_BLOCK:
-	db 202
+	db 96 ; 202
 IPF_BLOCKS_NUM:
 	db 2
 IS_LEGACY_SCHIP:

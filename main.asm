@@ -681,7 +681,9 @@ Case0:
 	jp z, OP_00FB
 	dec a ; $FC
 	jp z, OP_00FC
-	sub 2 ; $FE
+	dec a ; $FD
+	jp z, ResetChip8 ; $00FD is exit interpreter, just doing reset for now.
+	dec a ; $FE
 	jp z, OP_00FE
 	dec a ; $FF
 	jp z, OP_00FF
@@ -710,21 +712,22 @@ OP_00EE:
 
 	INSTR_END()
 
-OP_00E0: 
-	ld hl, SCREEN_BUF
-	ldh a, [IS_GBC]
-	and a
-	jr nz, .after
-	ld hl, VRAM_SCREEN_BUF
-	halt ; wait for VBlank
-	ld a, [LCDCF_OFF]
-	ldh [rLCDC], a ; turn off LCD
-.after:
-	xor a
+; \1 - 1 if running on GBC, 0 if not.
+MACRO CLEAR_SCREEN
+	IF \1 == 0
+		ld hl, VRAM_SCREEN_BUF
+	ELSE
+		ld hl, SCREEN_BUF
+		xor a
+	ENDC
 	ld c, 8
 
-.clearBlock:
-	REPT 127
+.clearBlock\@:
+	FOR i, 127
+		IF \1 == 0 && (i % 2) == 0
+			WAIT_VRAM_ACCESS()
+			xor a
+		ENDC
 		ld [hl+], a
 		inc l
 	ENDR
@@ -734,7 +737,7 @@ OP_00E0:
 	inc hl
 
 	dec c
-	jp nz, .clearBlock
+	jp nz, .clearBlock\@
 
 	inc a ; will become 1
 	ldh [DRAW_FLAG], a
@@ -743,19 +746,39 @@ OP_00E0:
 	ldh [rLCDC], a
 
 	INSTR_END()
+ENDM
 
-; \1 = 0 - left, otherwise right.
+OP_00E0:
+	ldh a, [IS_GBC]
+	and a
+	jp nz, .gbc
+	CLEAR_SCREEN(0)
+.gbc:
+	CLEAR_SCREEN(1)
+
+; \1 = 0 - left, otherwise right; \2 - 1 if running on GBC, 0 if not.
 MACRO SCROLL_HORIZONTAL 
-	ld a, 1
-	ldh [DRAW_FLAG], a
-
-	IF \1 == 0
-		ld hl, SCREEN_BUF
-		ld de, SCREEN_BUF + 128
+	IF \2 == 0
+		IF \1 == 0
+			ld hl, VRAM_SCREEN_BUF
+			ld de, VRAM_SCREEN_BUF + 128
+		ELSE
+			ld hl, VRAM_SCREEN_BUF + (128 * 16) - 2
+			ld de, VRAM_SCREEN_BUF + (128 * 15) - 2
+		ENDC
 	ELSE
-		ld hl, SCREEN_BUF + (128 * 16) - 2
-		ld de, SCREEN_BUF + (128 * 15) - 2
+		ld a, 1
+		ldh [DRAW_FLAG], a
+
+		IF \1 == 0
+			ld hl, SCREEN_BUF
+			ld de, SCREEN_BUF + 128
+		ELSE
+			ld hl, SCREEN_BUF + (128 * 16) - 2
+			ld de, SCREEN_BUF + (128 * 15) - 2
+		ENDC
 	ENDC
+
 	ld c, 120
 
 	ldh a, [HIGH_RES_MODE_FLAG]
@@ -767,6 +790,10 @@ MACRO SCROLL_HORIZONTAL
 
 .moveTile\@:
 	REPT 7
+		IF \2 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
+
 		ld a, [de]
 		IF \1 == 0
 			ld [hl+], a
@@ -801,9 +828,17 @@ MACRO SCROLL_HORIZONTAL
 
 	; clear right/left column
 	IF \1 == 0
-		ld hl, SCREEN_BUF + (128 * 15)
+		IF \2 == 0
+			ld hl, VRAM_SCREEN_BUF + (128 * 15)
+		ELSE
+			ld hl, SCREEN_BUF + (128 * 15)
+		ENDC
 	ELSE
-		ld hl, SCREEN_BUF
+		IF \2 == 0
+			ld hl, VRAM_SCREEN_BUF
+		ELSE
+			ld hl, SCREEN_BUF
+		ENDC
 	ENDC
 	ld c, 8
 	xor a
@@ -821,6 +856,10 @@ MACRO SCROLL_HORIZONTAL
 
 .highResMode\@:
 	REPT 8
+		IF \2 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
+
 		ld a, [de]
 		; if scrolling left, create mask with msb nibble moved to lsb. If right, then lsb to msb.
 		swap a
@@ -857,15 +896,27 @@ MACRO SCROLL_HORIZONTAL
 
 	; clear half of right/left column
 	IF \1 == 0
-		ld hl, SCREEN_BUF + (128 * 15)
+		IF \2 == 0
+			ld hl, VRAM_SCREEN_BUF + (128 * 15)
+		ELSE
+			ld hl, SCREEN_BUF + (128 * 15)
+		ENDC
 		ld bc, ($F0 << 8) | 8
 	ELSE
-		ld hl, SCREEN_BUF
+		IF \2 == 0
+			ld hl, VRAM_SCREEN_BUF
+		ELSE
+			ld hl, SCREEN_BUF
+		ENDC
 		ld bc, ($0F << 8) | 8
 	ENDC
 
 .clearHalfTile\@
 	REPT 8
+		IF \2 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
+
 		ld a, [hl]
 		and b
 		ld [hl+], a
@@ -878,26 +929,37 @@ MACRO SCROLL_HORIZONTAL
 ENDM
 
 OP_00FB: ; scroll right 4 pixels 
-	SCROLL_HORIZONTAL(1)
+	ldh a, [IS_GBC]
+	and a
+	jp nz, .gbc
+	SCROLL_HORIZONTAL 1, 0
+.gbc:
+	SCROLL_HORIZONTAL 1, 1
 
 OP_00FC: ; scroll left 4 pixels
-	SCROLL_HORIZONTAL(0)
+	ldh a, [IS_GBC]
+	and a
+	jp nz, .gbc
+	SCROLL_HORIZONTAL 0, 0
+.gbc:
+	SCROLL_HORIZONTAL 0, 1
 
-OP_00CN: ; scroll down N pixels
+; \1 - 1 if running on GBC, 0 if not.
+MACRO SCROLL_DOWN
 	LD_N()
-	jp z, .scroll0
+	jp z, .scroll0\@
 	ld b, a
 	; scroll twice as much in modern schip lores mode
 	ldh a, [HIGH_RES_MODE_FLAG]
 	and a
-	jr nz, .skipAdd
+	jr nz, .skipAdd\@
 	ld a, [IS_LEGACY_SCHIP]
 	and a
-	jr nz, .skipAdd
+	jr nz, .skipAdd\@
 	ld a, b
 	add a
 	ld b, a
-.skipAdd:
+.skipAdd\@:
 	; temp1, c = 64 - b (number of iterations per column)
 	ld a, b
 	cpl
@@ -905,7 +967,13 @@ OP_00CN: ; scroll down N pixels
 	ldh [temp1], a
 	ld c, a
 
-	ld hl, SCREEN_BUF + (128 * 16) - 2
+	IF \1 == 0
+		ld hl, VRAM_SCREEN_BUF + (128 * 16) - 2
+	ELSE
+		ld hl, SCREEN_BUF + (128 * 16) - 2
+		ld a, 1
+		ldh [DRAW_FLAG], a 
+	ENDC
 	; de = hl - (a * 2)
 	ld a, b
 	ldh [temp2], a ; saving N in temp2
@@ -916,11 +984,12 @@ OP_00CN: ; scroll down N pixels
 	ld d, h
 	ld e, a
 
-	ld a, 1
-	ldh [DRAW_FLAG], a 
-
 	REPT 16
 	.moveTile\@:
+		IF \1 == 0
+			WAIT_VRAM_ACCESS()
+		ENDC
+
 		ld a, [de]
 		ld [hl-], a
 
@@ -946,8 +1015,12 @@ OP_00CN: ; scroll down N pixels
 	ENDR
 
 	; clearing first N rows:
-
-	ld hl, SCREEN_BUF
+	
+	IF \1 == 0
+		ld hl, VRAM_SCREEN_BUF
+	ELSE
+		ld hl, SCREEN_BUF
+	ENDC
 	ldh a, [temp2] ; saved N
 	ld b, a
 	; storing 128 - (b * 2) in de (number of bytes to the first row of the next column).
@@ -961,6 +1034,11 @@ OP_00CN: ; scroll down N pixels
 	REPT 16
 		ld c, b
 	.clearTile\@:
+		IF \1 == 0
+			WAIT_VRAM_ACCESS()
+			xor a
+		ENDC
+
 		ld [hl+], a
 		inc l
 		dec c
@@ -972,8 +1050,17 @@ OP_00CN: ; scroll down N pixels
 	; early instruction loop break, because scroll takes big part of the frame.
 	jp InstrLoopEnd
 
-.scroll0:
+.scroll0\@:
 	INSTR_END()
+ENDM
+
+OP_00CN: ; scroll down N pixels
+	ldh a, [IS_GBC]
+	and a
+	jp nz, .gbc
+	SCROLL_DOWN 0
+.gbc:
+	SCROLL_DOWN 1
 
 ; \1 - 0 is lores, 1 is hires
 MACRO CHANGE_RES_MODE
@@ -1982,7 +2069,7 @@ CHIP_ROM_END:
 
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
-
+; ; 
 ; CHIP_ROM: ; sweetcopter
 ; 	db 18,182,255,7,63,0,18,2,111,2,255,21,0,238,163,89,96,88,97,8,208,16,112,16,48,168,18,20,0,238,163,57,77,3,163,25,104,0,218,176,136,241,162,217,76,1,162,249,96,16,128,183,218,0,136,241,0,238,224,161,0,238,105,0,0,238,96,6,57,0,18,58,224,158,0,238,105,1,96,255,141,3,125,1,0,238,123,255,96,63,128,178,64,0,119,1,0,238,96,1,140,3,34,86,192,1,64,1,34,86,138,212,34,66,0,238,96,56,97,18,163,121,208,16,111,6,239,158,18,126,208,16,0,238,111,16,255,24,255,21,0,252,0,251,0,251,0,252,255,7,63,0,18,140,162,214,247,51,242,101,241,48,96,55,97,30,208,26,242,48,112,9,208,26,111,6,239,158,18,176,0,224,0,255,106,56,107,48,109,3,105,0,103,0,34,14,34,30,34,116,34,30,34,98,34,30,56,0,18,134,34,2,18,200,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,122,94,137,145,240,15,1,128,1,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,14,240,49,12,62,252,1,128,1,128,0,0,7,192,24,48,32,8,35,184,68,68,72,138,72,2,72,2,52,68,35,184,48,8,75,244,72,20,48,24,17,32,15,192,3,224,12,24,16,4,29,196,34,34,81,18,64,18,64,18,34,44,29,196,16,12,47,146,40,18,24,12,4,136,3,240,255,255,0,0,195,195,126,126,60,60,60,60,60,60,126,126,255,255,0,0,255,255,0,0,0,0,0,0,0,0,0,0,63,252,127,254,255,255,240,15,240,15,243,255,240,127,240,127,243,255,240,15,240,15,255,255,127,254,63,252,0,192,0,128
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0

@@ -103,7 +103,7 @@ DEF FX0A_NOT_ACTIVE_FLAG EQU -1
 DEF FX0A_DONE_FLAG EQU -2
 
 DEF BG_TILE_TILEMAP_NUM EQU $80
-DEF DIGIT0_TILE_NUM EQU $82
+DEF DIGIT0_TILE_NUM EQU $81
 DEF F_TILE_NUM EQU DIGIT0_TILE_NUM + 10
 DEF P_TILE_NUM EQU DIGIT0_TILE_NUM + 11
 DEF S_TILE_NUM EQU DIGIT0_TILE_NUM + 12
@@ -498,10 +498,7 @@ EntryPoint:
 	ldh [rBGP], a	
 .after:
 	MEMCPY $9800, TILE_MAP, TILE_MAP_END
-	MEMCPY $9C00, EMPTY_TILE_MAP, EMPTY_TILE_MAP_END
-	MEMCPY VRAM_EMPTY_TILE, EMPTY_TILE, EMPTY_TILE + $16
-	MEMCPY_1BIT_TILES VRAM_BG_TILE, BG_TILE, BG_TILE + $8
-	MEMCPY_1BIT_TILES VRAM_FONT_TILES, FONT_TILES, FONT_TILES_END
+	MEMCPY_1BIT_TILES VRAM_TILES, TILES, TILES_END
 
 	xor a
 	ldh [KEY_STATE], a
@@ -681,7 +678,6 @@ Case0:
 	and $F0
 	cp $C0
 	jp z, OP_00CN
-	INSTR_END()
 	jp InvalidInstr
 
 OP_00EE:
@@ -707,20 +703,10 @@ OP_00EE:
 MACRO CLEAR_SCREEN
 	IF \1 == 0
 		ld hl, VRAM_SCREEN_BUF
-		; display empty (black screen) tilemap while actual framebuf is being cleared (takes most of the frame)
-		ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000 | LCDCF_BG9C00
-		ldh [rLCDC], a
-
-		FOR i, 3
-			WAIT_VRAM_ACCESS()
-			ld a, [$9800 | (FPS_DIGIT0_TILEMAP_NUM + i)]
-			ld [$9C00 | (FPS_DIGIT0_TILEMAP_NUM + i)], a
-		ENDR
-		FOR i, 3
-			WAIT_VRAM_ACCESS()
-			ld a, [$9800 | (IPF_DIGIT0_TILEMAP_NUM + i)]
-			ld [$9C00 | (IPF_DIGIT0_TILEMAP_NUM + i)], a
-		ENDR
+		; change palette to color id 1 (set chip8 pixel) to be black so screen is seen as clear immediately with no tearing,
+		; while actual framebuf is being cleared (takes most of the frame)
+		ld a, %01101111
+		ldh [rBGP], a
 	ELSE
 		ld hl, SCREEN_BUF
 		xor a
@@ -745,9 +731,9 @@ MACRO CLEAR_SCREEN
 	jp nz, .clearBlock\@
 
 	IF \1 == 0
-		; switch back to regular ($9800) tilemap
-		ld a, LCDCF_ON | LCDCF_BGON | LCDCF_BG8000
-		ldh [rLCDC], a
+		; switch back to regular palette.
+		ld a, %01100011
+		ldh [rBGP], a	
 	ELSE
 		inc a ; will become 1
 		ldh [DRAW_FLAG], a
@@ -1926,18 +1912,11 @@ FX85:
 	SCHIP_RPL_STORE(0)
 
 SECTION "VRAMTiles", VRAM[$8000 + SCREEN_BUF_SIZE]
-VRAM_BG_TILE: ; Tile $80, used for background around the 128x64 screen 
-	ds 16
-VRAM_EMPTY_TILE: ; Tile $81, solid black
-	ds 16
-VRAM_FONT_TILES:
+VRAM_TILES:
 
 SECTION "Tiles", ROMX
-BG_TILE:
-	ds 8, $00
-EMPTY_TILE:
-	ds 16, $00
-FONT_TILES:
+TILES:
+	ds 8, $00 ; Tile $80, used for background around the 128x64 screen 
 	db 124, 198, 206, 222, 246, 230, 124, 0 ; 0
 	db 48, 112, 48, 48, 48, 48, 252, 0 		; 1
 	db 120, 204, 12, 56, 96, 204, 252, 0	; 2
@@ -1955,7 +1934,7 @@ FONT_TILES:
 	db 0, 48, 48, 0, 0, 48, 48, 0			; :
 	db 6, 6, 6, 6, 6, 6, 6, 6			    ;  |
 	db 96, 96, 96, 96, 96, 96, 96, 96		; |
-FONT_TILES_END:
+TILES_END:
 
 SECTION "TileMap", ROMX
 TILE_MAP:
@@ -1986,36 +1965,6 @@ TILE_MAP:
     ENDR
     ENDR
 TILE_MAP_END:
-
-SECTION "EmptyTileMap", ROMX
-EMPTY_TILE_MAP:
-    db F_TILE_NUM, P_TILE_NUM, S_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
-    db $80, $80, $80, $80, $80, $80, $80
-
-    db I_TILE_NUM, P_TILE_NUM, F_TILE_NUM, COL_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM, DIGIT0_TILE_NUM
-    db $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80, $80
-
-    REPT 4
-        REPT 32
-            db $80
-        ENDR
-    ENDR
-
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-    db $80, $80, $81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81,$81, $80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80,$80
-
-    REPT 5
-        REPT 32
-            db $80
-        ENDR
-    ENDR
-EMPTY_TILE_MAP_END:
 
 SECTION "Settings", ROMX[$4000]
 KEY_MAP:

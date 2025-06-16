@@ -84,7 +84,7 @@ ConvertToBCD3: ; hl -> bc
 
 Mul8x8: ; b x c -> hl
 	ld hl, 0
-	ld d, 0
+	ld d, l
 	ld e, b
 	ld a, b
 	cp c
@@ -147,7 +147,7 @@ MACRO RAND ; RNG_STATE -> bc
   	ld [hl+], a
   	adc [hl]
   	ld [hl+], a
-  	adc a, [hl]
+  	adc [hl]
   	ld [hl+], a
   	ld c, a
   	adc [hl]

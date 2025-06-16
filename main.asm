@@ -93,6 +93,7 @@ ENDM
 DEF CHIP_RAM_SIZE EQU 4096
 DEF CHIP_ROM_SIZE EQU (CHIP_RAM_SIZE - $200)
 DEF CHIP_RAM_DEADBUF_SIZE EQU 32
+DEF CHIP_STACK_SIZE EQU 32
 DEF CHIP_SCR_WIDTH EQU 64
 DEF CHIP_SCR_HEIGHT EQU 32
 DEF SCHIP_SCR_WIDTH EQU 128
@@ -124,8 +125,6 @@ V0:
 	ds 15
 VF:
 	ds 1
-CHIP_STACK:
-	ds 32
 CHIP_SP:
 	ds 1
 I_REG:
@@ -163,11 +162,6 @@ PRESSED_KEYS:
 	ds 1
 RELEASED_KEYS:
 	ds 1
-DXYN_MASK_LOOUKUPS:
-DXYN_LORES_MASK_LOOKUP:
-	ds 4
-DXYN_HIRES_MASK_LOOKUP:
-	ds 8
 ; Regular code temps:
 temp1:
 	ds 1
@@ -188,6 +182,10 @@ CHIP_RAM:
 	ds CHIP_RAM_SIZE
 CHIP_RAM_END:
 
+SECTION "ChipStack", WRAM0, ALIGN[8]
+CHIP_STACK:
+	ds CHIP_STACK_SIZE
+
 ; These 32 bytes are always 0, and the purpose is to protect OOB memory reads (for example in dxyn) when I register is > $FFF,
 ; without having to mask it every time. since CHIP_RAM ends at DFFF, E000-FDFF is a mirror of C000 and will read from here.
 SECTION "ChipRAMDeadBuf", WRAM0[$C000]
@@ -201,42 +199,6 @@ SCREEN_BUF:
 SECTION "VRAMScreenBuf", VRAM[$8000]
 VRAM_SCREEN_BUF:
 	ds SCREEN_BUF_SIZE
-
-SECTION "DXYNGBCLoresLookup", ROMX, ALIGN[8]
-DXYN_GBC_LORES_BASE_ADDR_LOOKUP:
-	FOR x, CHIP_SCR_WIDTH
-		db LOW((x / 4) * 128 + SCREEN_BUF)
-		db HIGH((x / 4) * 128 + SCREEN_BUF)
-	ENDR
-SECTION "DXYNGBCHiresLookup", ROMX, ALIGN[8]
-DXYN_GBC_HIRES_BASE_ADDR_LOOKUP:
-	FOR x, SCHIP_SCR_WIDTH
-		db LOW((x / 8) * 128 + SCREEN_BUF)
-		db HIGH((x / 8) * 128 + SCREEN_BUF)
-	ENDR
-
-SECTION "DXYNDMGLoresLookup", ROMX, ALIGN[8]
-DXYN_DMG_LORES_BASE_ADDR_LOOKUP:
-	FOR x, CHIP_SCR_WIDTH
-		db LOW((x / 4) * 128 + VRAM_SCREEN_BUF)
-		db HIGH((x / 4) * 128 + VRAM_SCREEN_BUF)
-	ENDR
-SECTION "DXYNDMGHiresLookup", ROMX, ALIGN[8]
-DXYN_DMG_HIRES_BASE_ADDR_LOOKUP:
-	FOR x, SCHIP_SCR_WIDTH
-		db LOW((x / 8) * 128 + VRAM_SCREEN_BUF)
-		db HIGH((x / 8) * 128 + VRAM_SCREEN_BUF)
-	ENDR
-
-SECTION "DXYNMaskLookups", ROMX
-DXYN_MASK_LOOKUPS_ROM:
-	FOR i, 4 ; lores
-		db (%11000000 >> (i * 2))
-	ENDR
-	FOR i, 8 ; hires
-		db (%10000000 >> i)
-	ENDR
-DXYN_MASK_LOOKUPS_ROM_END:
 
 MACRO UPDATE_IPF ; \1 = 0 - decrease, else increase
 	ldh a, [IPF_PER_BLOCK]
@@ -505,8 +467,6 @@ EntryPoint:
 	ldh [PRESSED_KEYS], a
 	ldh [RELEASED_KEYS], a
 
-	MEMCPY DXYN_MASK_LOOUKUPS, DXYN_MASK_LOOKUPS_ROM, DXYN_MASK_LOOKUPS_ROM_END
-
 	; xor first byte of RNG state with DIV so it's not all zeroes on emulators which don't emulate random WRAM values.
 	ldh a, [rDIV]
 	ld b, a
@@ -530,6 +490,7 @@ InitChip8:
 	MEMCPY CHIP_RAM + (CHIP8_FONT_END - CHIP8_FONT), SCHIP_FONT, SCHIP_FONT_END
 	MEMCPY CHIP_RAM + $200, CHIP_ROM, CHIP_ROM_END
 	MEMSET CHIP_RAM_DEAD_BUF, 0, CHIP_RAM_DEADBUF_SIZE
+	MEMSET CHIP_STACK, 0, CHIP_STACK_SIZE
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
 	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
@@ -688,13 +649,13 @@ OP_00EE:
 	ldh [CHIP_SP], a
 
 	ld hl, sp + 0
-	add LOW(CHIP_STACK)
-	ld c, a
+	ld d, HIGH(CHIP_STACK)
+	ld e, a
 	; loading address from the chip8 stack into PC
-	ldh a, [c]
+	ld a, [de]
 	ld [hl+], a
-	inc c
-	ldh a, [c]
+	inc e
+	ld a, [de]
 	ld [hl], a
 
 	INSTR_END()
@@ -703,8 +664,8 @@ OP_00EE:
 MACRO CLEAR_SCREEN
 	IF \1 == 0
 		ld hl, VRAM_SCREEN_BUF
-		; change palette to color id 1 (set chip8 pixel) to be black so screen is seen as clear immediately with no tearing,
-		; while actual framebuf is being cleared (takes most of the frame)
+		; change palette for color id 1 (set chip8 pixel) to be black so screen is seen as clear immediately with no tearing,
+		; while actual framebuf is being cleared (takes more than half of the frame)
 		ld a, %01101111
 		ldh [rBGP], a
 	ELSE
@@ -731,7 +692,7 @@ MACRO CLEAR_SCREEN
 	jp nz, .clearBlock\@
 
 	IF \1 == 0
-		; switch back to regular palette.
+		; switch back to the regular palette.
 		ld a, %01100011
 		ldh [rBGP], a	
 	ELSE
@@ -821,21 +782,22 @@ MACRO SCROLL_HORIZONTAL
 	jr nz, .moveTile\@
 
 	; clear right/left column
-	IF \1 == 0
-		IF \2 == 0
+	IF \2 == 0
+		IF \1 == 0
 			ld hl, VRAM_SCREEN_BUF + (128 * 15)
 		ELSE
-			ld hl, SCREEN_BUF + (128 * 15)
+			ld hl, VRAM_SCREEN_BUF
 		ENDC
 	ELSE
-		IF \2 == 0
-			ld hl, VRAM_SCREEN_BUF
+		IF \1 == 0
+			ld hl, SCREEN_BUF + (128 * 15)
 		ELSE
 			ld hl, SCREEN_BUF
 		ENDC
+		xor a
 	ENDC
+
 	ld c, 8
-	xor a
 
 .clearTile\@:
 	FOR i, 8
@@ -933,6 +895,7 @@ OP_00FB: ; scroll right 4 pixels
 	jp nz, .gbc
 	SCROLL_HORIZONTAL 1, 0
 .gbc:
+	ld b, b
 	SCROLL_HORIZONTAL 1, 1
 
 OP_00FC: ; scroll left 4 pixels
@@ -941,6 +904,7 @@ OP_00FC: ; scroll left 4 pixels
 	jp nz, .gbc
 	SCROLL_HORIZONTAL 0, 0
 .gbc:
+	ld c, c
 	SCROLL_HORIZONTAL 0, 1
 
 ; \1 - 1 if running on GBC, 0 if not.
@@ -1014,12 +978,7 @@ MACRO SCROLL_DOWN
 	ENDR
 
 	; clearing first N rows:
-	
-	IF \1 == 0
-		ld hl, VRAM_SCREEN_BUF
-	ELSE
-		ld hl, SCREEN_BUF
-	ENDC
+
 	ldh a, [temp2] ; saved N
 	ld b, a
 	; storing 128 - (b * 2) in de (number of bytes to the first row of the next column).
@@ -1028,8 +987,14 @@ MACRO SCROLL_DOWN
 	sub b
 	ld d, 0
 	ld e, a
+	
+	IF \1 == 0
+		ld hl, VRAM_SCREEN_BUF
+	ELSE
+		ld hl, SCREEN_BUF
+		xor a
+	ENDC
 
-	xor a
 	REPT 16
 		ld c, b
 	.clearTile\@:
@@ -1120,28 +1085,27 @@ OP_1NNN:
 
 Case2:
 OP_2NNN:
-	LD_NNN_RAM_PTR()
-	; saving current PC in DE
-	pop de
+	; saving current PC in BC
+	pop bc
+
 	; storing new PC
+	LD_NNN_RAM_PTR()
 	push hl
 	
 	; updating SP
 	ldh a, [CHIP_SP]
-	ld b, a ; saving current SP
+	ld e, a ; saving current SP
 	add 2
 	and $1F
 	ldh [CHIP_SP], a
 
-	; saving DE (old PC) to the chip8 stack
-	ld a, LOW(CHIP_STACK)
-	add b ; saved sp
-	ld c, a
-	ld a, e
-	ldh [c], a
-	inc c
-	ld a, d
-	ldh [c], a
+	; saving BC (old PC) to the chip8 stack
+	ld d, HIGH(CHIP_STACK)
+	ld a, c
+	ld [de], a
+	inc e
+	ld a, b
+	ld [de], a
 
 	INSTR_END()
 
@@ -1253,55 +1217,75 @@ OP_CXNN:
 
 	INSTR_END()
 
+SECTION "DXYNGBCLoresLookup", ROMX, ALIGN[8]
+DXYN_GBC_LORES_BASE_ADDR_LOOKUP:
+	FOR x, CHIP_SCR_WIDTH
+		db LOW((x / 4) * 128 + SCREEN_BUF)
+		db HIGH((x / 4) * 128 + SCREEN_BUF)
+	ENDR
+SECTION "DXYNGBCHiresLookup", ROMX, ALIGN[8]
+DXYN_GBC_HIRES_BASE_ADDR_LOOKUP:
+	FOR x, SCHIP_SCR_WIDTH
+		db LOW((x / 8) * 128 + SCREEN_BUF)
+		db HIGH((x / 8) * 128 + SCREEN_BUF)
+	ENDR
+
+SECTION "DXYNDMGLoresLookup", ROMX, ALIGN[8]
+DXYN_DMG_LORES_BASE_ADDR_LOOKUP:
+	FOR x, CHIP_SCR_WIDTH
+		db LOW((x / 4) * 128 + VRAM_SCREEN_BUF)
+		db HIGH((x / 4) * 128 + VRAM_SCREEN_BUF)
+	ENDR
+SECTION "DXYNDMGHiresLookup", ROMX, ALIGN[8]
+DXYN_DMG_HIRES_BASE_ADDR_LOOKUP:
+	FOR x, SCHIP_SCR_WIDTH
+		db LOW((x / 8) * 128 + VRAM_SCREEN_BUF)
+		db HIGH((x / 8) * 128 + VRAM_SCREEN_BUF)
+	ENDR
+
+SECTION "DXYNLoresMaskLookup", ROM0, ALIGN[8]
+DXYN_LORES_MASK_LOOKUP:
+	FOR i, CHIP_SCR_WIDTH 
+		db (%11000000 >> ((i & 3) * 2))
+	ENDR
+SECTION "DXYNHiresMaskLookup", ROM0, ALIGN[8]
+DXYN_HIRES_MASK_LOOKUP:
+	FOR i, SCHIP_SCR_WIDTH 
+		db (%10000000 >> (i & 7))
+	ENDR
+
 CaseD: 
 OP_DXYN:
-	; \1 - 1 if running on GBC, 0 if not.
-	; \2 - 1 if superchip hires, 0 if not; \3 - 1 if shoud load x offset, 0 if not; \4 - 0 if need to preserve hl, 1 if not.
-	MACRO DXYN_PROCESS_PIXEL 
-		IF \3 != 0
-			ld a, d ; X
-			IF \2 == 0
-				and $3
-			ELSE
-				and $7
-			ENDC
-		ENDC
-		IF \2 == 0
-			add LOW(DXYN_LORES_MASK_LOOKUP)
-		ELSE
-			add LOW(DXYN_HIRES_MASK_LOOKUP)
-		ENDC
-
-		ld c, a
-		ldh a, [c]
-		ld b, a ; saving mask in 'b'
+	; \1 - 1 if running on GBC, 0 if not
+	; \2 - 1 if superchip hires, 0 if not 
+	; \3 - 0 if need to preserve hl, 1 if not
+	MACRO DXYN_PROCESS_PIXEL ; mask pointer is in BC
+		ld a, [bc]
+		ld c, a ; saving mask in 'c'
 
 		; DMG, must wait for hblank/vblank so VRAM is accessible
 		IF \1 == 0
 			WAIT_VRAM_ACCESS()
+			ld a, c
 		ENDC
 
-		; loading and saving current screen buf byte in c
-		ld a, [hl]
-		ld c, a
 		; collision detection:
-		and b
+		and [hl]
 		jr z, .noCollision\@
-		ld a, 1
+		IF \1 != 0
+			ld a, 1
+		ENDC
 		ldh [VF], a
 	.noCollision\@:
-		IF \1 == 0
-			WAIT_VRAM_ACCESS()
-		ENDC
 		; drawing:
 		ld a, c
-		xor b
+		xor [hl]
 		; if superchip hires is not active then write the byte again to hl + 2, since framebuf is double scaled.
 		IF \2 == 0 
 			ld [hl+], a
 			inc l
 			ld [hl-], a
-			IF \4 == 0
+			IF \3 == 0
 				dec l
 			ENDC
 		ELSE
@@ -1309,16 +1293,22 @@ OP_DXYN:
 		ENDC
 	ENDM
 
-	; \1 - 1 if running on GBC, 0 if not.
+	; \1 - 1 if running on GBC, 0 if not
 	MACRO DXYN_FINISH
-		IF \1 != 0
+		; on DMG correct VF to be either 0 or 1 if collision occured, not other value.
+		IF \1 == 0 
+			ldh a, [VF]
+			jr z, .noCollision\@
 			ld a, 1
-			ldh [DRAW_FLAG], a
+			ldh [VF], a
+		.noCollision\@:
 		ENDC
 		INSTR_END()
 	ENDM
 
-	; \1 - loop label; \2 - 1 if running on GBC, 0 if not; \3 - 1 if superchip hires, 0 if not.
+	; \1 - loop label
+	; \2 - 1 if running on GBC, 0 if not
+	; \3 - 1 if superchip hires, 0 if not
 	MACRO DXYN_CHECK_LOOP
 		pop bc
 		ldh a, [temp2] ; Y
@@ -1345,8 +1335,18 @@ OP_DXYN:
 		DXYN_FINISH(\2)
 	ENDM
 
+	; \1 - 1 if superchip hires, 0 if not
+	MACRO DXYN_LD_MASK_HIGH_PTR
+		IF \1 == 0
+			ld b, HIGH(DXYN_LORES_MASK_LOOKUP)
+		ELSE
+			ld b, HIGH(DXYN_HIRES_MASK_LOOKUP)
+		ENDC
+	ENDM
+
 	; \1 - 1 if running on GBC, 0 if not.
-	; \2 - 1 if superchip hires, 0 if not; \3 - height or -1 if not known at compile time
+	; \2 - 1 if superchip hires, 0 if not;
+	; \3 - height or -1 if not known at compile time
 	MACRO DRAW_SPRITE
 	.heightLoop\@:
 		ld a, [bc]
@@ -1361,10 +1361,13 @@ OP_DXYN:
 			push bc
 		ENDC
 
+		DXYN_LD_MASK_HIGH_PTR(\2)
+		ld c, d
+
 		IF \3 != 16
 			cp $80
 			jr nz, .regularDraw\@
-			DXYN_PROCESS_PIXEL \1, \2, 1, \3 == 1 ; single-pixel draw
+			DXYN_PROCESS_PIXEL \1, \2, \3 == 1 ; single-pixel draw
 			IF \3 == 1
 				DXYN_FINISH(\1)
 			ELSE
@@ -1395,40 +1398,46 @@ OP_DXYN:
 				jr nz, .noOffset\@
 				ld bc, 128
 				add hl, bc
+				DXYN_LD_MASK_HIGH_PTR(\2)
 			ENDC
 		.noOffset\@:
        		bit i, e
         	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL \1, \2, i == 7, (i == 0 && \3 != 16)
-    	.skipPixel\@:
-    	ENDR
-
-	IF \3 == 16 ; 16x16
-		ldh a, [temp3] ; loading second column
-		ld e, a
-
-		FOR i, 7, -1, -1
-			ld a, d
-			add (15 - i)
-			IF \2 == 0
-				cp CHIP_SCR_WIDTH
-				jp z, xClipLabel
-				and $3
-			ELSE
-				cp SCHIP_SCR_WIDTH
-				jp z, xClipLabel
-				and $7
+			IF i != 7
+				ld c, a ; x-offset
 			ENDC
-			jr nz, .noOffset\@
-			ld bc, 128
-			add hl, bc
-		.noOffset\@:
-       		bit i, e
-        	jr z, .skipPixel\@
-        	DXYN_PROCESS_PIXEL \1, \2, 0, i == 0
+        	DXYN_PROCESS_PIXEL \1, \2, (i == 0 && \3 != 16)
     	.skipPixel\@:
     	ENDR
-	ENDC
+
+		IF \3 == 16 ; 16x16
+			ldh a, [temp3] ; loading second column
+			ld e, a
+
+			FOR i, 7, -1, -1
+				ld a, d
+				add (15 - i)
+				IF \2 == 0
+					cp CHIP_SCR_WIDTH
+					jp z, xClipLabel
+					and $3
+				ELSE
+					cp SCHIP_SCR_WIDTH
+					jp z, xClipLabel
+					and $7
+				ENDC
+				jr nz, .noOffset\@
+				ld bc, 128
+				add hl, bc
+				DXYN_LD_MASK_HIGH_PTR(\2)				
+			.noOffset\@:
+       			bit i, e
+        		jr z, .skipPixel\@
+				ld c, a
+        		DXYN_PROCESS_PIXEL \1, \2, i == 0
+    		.skipPixel\@:
+    		ENDR
+		ENDC
 
  	{xClipLabel}:
 		pop hl
@@ -1439,21 +1448,23 @@ OP_DXYN:
     	ENDC
 	ENDM
 
-	; \1 - 1 if superchip hires, 0 if not; \2 - 1 if need to save Y in temp2, 0 if not.
+	; \1 - 1 if running on GBC, 0 if not.
+	; \2 - 1 if superchip hires, 0 if not; 
+	; \3 - 1 if need to save Y in temp2, 0 if not.
 	MACRO LOAD_Y
 		LD_VY()
-		IF \1 == 0
+		IF \2 == 0
 			and CHIP_SCR_HEIGHT - 1
 		ELSE
 			and SCHIP_SCR_HEIGHT - 1
 		ENDC
-		IF \2 != 0
+		IF \3 != 0
 			ldh [temp2], a
 		ENDC
 
 		; add y * 2 to screen buf addr in hires, y * 4 in lores
 		add a
-		IF \1 == 0
+		IF \2 == 0
 			add a
 		ENDC
 		add l
@@ -1462,6 +1473,12 @@ OP_DXYN:
 		; reset VF (both VX and VY are fetched now)
 		xor a
 		ldh [VF], a
+
+		; set draw flag to 1 on GBC
+		IF \1 != 0
+			inc a
+			ldh [DRAW_FLAG], a
+		ENDC
 	ENDM
 
 	; \1 - 1 if running on GBC, 0 if not. \2 - 1 if superchip hires, 0 if not
@@ -1495,21 +1512,21 @@ OP_DXYN:
 		LD_N()
 		dec a ; check if N == 1 
 		jp nz, .regularDraw\@
-		LOAD_Y \2, 0
+		LOAD_Y \1, \2, 0
 		LD_I_MEM_PTR b, c 
 		DRAW_SPRITE \1, \2, 1 ; 8x1 (single row) draw
 	.regularDraw\@:
 		inc a
 		jp z, .draw16x16\@
 		ldh [temp1], a ; saving height in temp1
-		LOAD_Y \2, 1
+		LOAD_Y \1, \2, 1
 		LD_I_MEM_PTR b, c
 	.draw8xN\@:
 		DRAW_SPRITE \1, \2, -1 
 	.draw16x16\@:
 		ld a, 16
 		ldh [temp1], a
-		LOAD_Y \2, 1
+		LOAD_Y \1, \2, 1
 		LD_I_MEM_PTR b, c
 		IF \2 == 0 ; legacy schip draws 8x16 instead of 16x16 in lores mode
 			ld a, [IS_LEGACY_SCHIP]
@@ -1790,9 +1807,8 @@ FX30:
 	; Multiply by 10
 	add a
 	add a
+	add b
 	add a
-	add b
-	add b
 
 	; schip font is stored after chip8 font, so add offset
 	add (CHIP8_FONT_END - CHIP8_FONT)
@@ -2030,7 +2046,7 @@ SCHIP_FONT:
     db $FE, $66, $62, $64, $7C, $64, $60, $60, $F0, $00, ; F
 SCHIP_FONT_END:
 INITIAL_IPF_PER_BLOCK:
-	db 96 ; 202
+	db 100; 1; 96 ; 202
 IPF_BLOCKS_NUM:
 	db 2
 IS_LEGACY_SCHIP:
@@ -2073,7 +2089,8 @@ CHIP_ROM_END:
 
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0
 ; CHIP_ROM_END:
-; ; 
+; 
+
 ; CHIP_ROM: ; sweetcopter
 ; 	db 18,182,255,7,63,0,18,2,111,2,255,21,0,238,163,89,96,88,97,8,208,16,112,16,48,168,18,20,0,238,163,57,77,3,163,25,104,0,218,176,136,241,162,217,76,1,162,249,96,16,128,183,218,0,136,241,0,238,224,161,0,238,105,0,0,238,96,6,57,0,18,58,224,158,0,238,105,1,96,255,141,3,125,1,0,238,123,255,96,63,128,178,64,0,119,1,0,238,96,1,140,3,34,86,192,1,64,1,34,86,138,212,34,66,0,238,96,56,97,18,163,121,208,16,111,6,239,158,18,126,208,16,0,238,111,16,255,24,255,21,0,252,0,251,0,251,0,252,255,7,63,0,18,140,162,214,247,51,242,101,241,48,96,55,97,30,208,26,242,48,112,9,208,26,111,6,239,158,18,176,0,224,0,255,106,56,107,48,109,3,105,0,103,0,34,14,34,30,34,116,34,30,34,98,34,30,56,0,18,134,34,2,18,200,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,122,94,137,145,240,15,1,128,1,128,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,128,2,64,14,240,49,12,62,252,1,128,1,128,0,0,7,192,24,48,32,8,35,184,68,68,72,138,72,2,72,2,52,68,35,184,48,8,75,244,72,20,48,24,17,32,15,192,3,224,12,24,16,4,29,196,34,34,81,18,64,18,64,18,34,44,29,196,16,12,47,146,40,18,24,12,4,136,3,240,255,255,0,0,195,195,126,126,60,60,60,60,60,60,126,126,255,255,0,0,255,255,0,0,0,0,0,0,0,0,0,0,63,252,127,254,255,255,240,15,240,15,243,255,240,127,240,127,243,255,240,15,240,15,255,255,127,254,63,252,0,192,0,128
 ; 	ds CHIP_ROM_SIZE - (@ - CHIP_ROM), 0

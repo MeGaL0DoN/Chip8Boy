@@ -112,11 +112,11 @@ UpdateKeys:
 		or $F0 
 	ENDM
 
-  	ld a, P1F_GET_BTN
+  	ld a, JOYP_GET_BUTTONS
 	readNibble()
   	ld l, a 
 
-	ld a, P1F_GET_DPAD
+	ld a, JOYP_GET_CTRL_PAD
 	readNibble()
   	swap a
   	xor l 
@@ -131,7 +131,7 @@ UpdateKeys:
 	ld a, l
 	ldh [KEY_STATE], a
 
-  	ld a, P1F_GET_NONE
+  	ld a, JOYP_GET_NONE
   	ldh [rP1], a
 	ret
 
@@ -167,7 +167,8 @@ MACRO JP_TABLE ;
 	jp hl
 ENDM
 
-MACRO START_GDMA ; \1: destination; \2: source; \3: number of bytes
+; \1: destination; \2: source; \3: number of bytes
+MACRO START_GDMA 
 	ld hl, rHDMA1
 	ld a, HIGH(\2)
 	ld [hl+], a

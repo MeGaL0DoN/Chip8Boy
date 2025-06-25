@@ -130,7 +130,7 @@ UpdateKeys:
 	ldh [RELEASED_KEYS], a
 	ld a, l
 	ldh [KEY_STATE], a
-
+	
   	ld a, JOYP_GET_NONE
   	ldh [rP1], a
 	ret
@@ -168,7 +168,7 @@ MACRO JP_TABLE ;
 ENDM
 
 ; \1: destination; \2: source; \3: number of bytes
-MACRO START_GDMA 
+MACRO RUN_GDMA 
 	ld hl, rHDMA1
 	ld a, HIGH(\2)
 	ld [hl+], a
@@ -186,4 +186,10 @@ MACRO WAIT_VRAM_ACCESS
 	ldh a, [rSTAT]
 	bit 1, a
 	jr nz, .wait\@
+ENDM
+
+MACRO SAFE_HALT
+	xor a
+	ldh [rIF], a
+	halt
 ENDM

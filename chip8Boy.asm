@@ -77,11 +77,11 @@ MACRO LD_I_MEM_PTR
 	ld \1, a
 ENDM
 
-; \1 - label to jump on OOB
+; \1 - high register of the poinnter, \2 - label to jump on OOB
 MACRO CHECK_MEM_WRITE_OOB
-	ld a, h
+	ld a, \1
 	cp HIGH(CHIP_RAM_END)
-	jr z, \1
+	jr z, \2
 ENDM
 
 MACRO SKIP_NEXT_INSTR
@@ -130,6 +130,8 @@ PRESSED_KEYS:
 	ds 1
 RELEASED_KEYS:
 	ds 1
+IGNORE_KEYS:
+	ds 1
 IPF_PER_BLOCK:
 	ds 1
 IPF_BLOCKS_NUM:
@@ -161,9 +163,9 @@ SOUND_TIMER:
 	ds 1
 HIGH_RES_MODE_FLAG:
 	ds 1
-DRAW_FLAG:
-	ds 1
 FRAME_DONE_FLAG:
+	ds 1
+DRAW_FLAG:
 	ds 1
 FRAME_COUNTER:
 	ds 1
@@ -252,12 +254,62 @@ MACRO UPDATE_IPF ; \1 = 0 - decrease, else increase
 	ld [hl], a
 	ret
 ENDM
+; \1 - 1 if running on GBC, 0 if not.
+MACRO CLEAR_SCREEN
+	IF \1 == 0
+		ld hl, VRAM_SCREEN_BUF
+		; change palette for color id 1 (set chip8 pixel) to be black so screen is seen as clear immediately,
+		; while actual framebuf is being cleared (takes more than half of the frame)
+		ld a, %01101111
+		ldh [rBGP], a
+	ELSE
+		ld hl, SCREEN_BUF
+		xor a
+	ENDC
+	ld c, 8
+
+.clearBlock\@:
+	FOR i, 127
+		IF \1 == 0 && (i % 5) == 0
+			WAIT_VRAM_ACCESS()
+			xor a
+		ENDC
+		ld [hl+], a
+		inc l
+	ENDR
+
+	; need to use 'inc hl' instead of 'inc l', because low byte will overflow.
+	ld [hl+], a
+	inc hl
+
+	dec c
+	jp nz, .clearBlock\@
+
+	IF \1 == 0
+		; switch back to the regular palette.
+		ld a, %01100011
+		ldh [rBGP], a	
+	ELSE
+		inc a ; will become 1
+		ldh [DRAW_FLAG], a
+	ENDC
+	ret
+ENDM
 
 SECTION "Functions", ROM0
 IncreaseIPF:
 	UPDATE_IPF(1)
 DecreaseIPF:
 	UPDATE_IPF(0)
+	
+ClearChipScreen:
+	ldh a, [IS_GBC]
+	and a
+	jp nz, .gbc
+	CLEAR_SCREEN(0)
+.gbc:
+	CLEAR_SCREEN(1)
+
 SecondElapsed:
 	ld [hl], 60
 	ld hl, DROPPED_FRAME_COUNTER
@@ -278,11 +330,31 @@ SecondElapsed:
 	add DIGIT0_TILE_NUM
 	ld [hl], a
 	ret 
+
 ResetChip8:
+	call ClearChipScreen
+	SAFE_HALT()
+	ldh a, [IS_GBC]
+	and a
+	jr z, .wait
+	RUN_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
+	; wait for any to release first
+.wait:
+	call UpdateKeys
+	ldh a, [KEY_STATE]
+	and $F
+	cp $F
+	jr nz, .done
+	SAFE_HALT()
+	jr .wait
+.done:
+	; put held keys in ignore list so they are not seen as pressed to the ROM until first release after reset.
+	ldh a, [KEY_STATE]
+	cpl
+	ldh [IGNORE_KEYS], a
 	ld sp, $D000
-	xor a
-	ldh [rLCDC], a ; disable LCD
 	jp InitChip8
+
 SwitchROM:
 	ldh [ROM_NUM], a
 	; update config ptr:
@@ -324,16 +396,20 @@ SwitchToPrevROM:
 	ld a, [NUM_OF_ROMS]
 	dec a ; go to last rom
 	jr SwitchROM
+
 PauseChip8: ; Waits for start or select press to resume.
 	ld hl, ($98 << 8) | PAUSE_ICON_TILEMAP_NUM
 	ld a, RIGHT_LINE_TILE_NUM
 	ld [hl+], a
 	ld [hl], LEFT_LINE_TILE_NUM
 .continueWait:
-	xor a
-	ldh [rIF], a
-	halt
+	SAFE_HALT()
 	call UpdateKeys
+	; remove released keys from ignore list
+	ldh a, [IGNORE_KEYS]
+	ld hl, RELEASED_KEYS
+	or [hl]
+	ldh [IGNORE_KEYS], a
 	ldh a, [PRESSED_KEYS]
 	bit B_PAD_START, a
 	jr nz, Resume
@@ -350,9 +426,12 @@ Resume:
 	ld [hl+], a
 	ld [hl], a
 	ret
+
 CheckFX0A:
 	ldh a, [RELEASED_KEYS]
 	and ~(PAD_START | PAD_SELECT) ; ignore start and select
+	ld hl, IGNORE_KEYS
+	and [hl]
 	ret z
 	push bc
 
@@ -400,6 +479,7 @@ CheckFX0A:
 	ldh [FX0A_KEY_REG], a
 	pop bc
 	ret
+
 SetupJumpTables:
 	MEMCPY MAIN_JUMP_TABLE, MAIN_JUMP_TABLE_ROM, MAIN_JUMP_TABLE_ROM_END
 	ldh a, [IS_GBC]
@@ -411,6 +491,7 @@ SetupJumpTables:
 	ld [hl+], a
 	ld [hl], HIGH(DXYN_LOW_RES_DMG)
 	ret
+
 LoadChipROM:
 	ldh a, [ROM_CONFIG_PTR]
 	ld l, a
@@ -483,7 +564,7 @@ VBlankHandler:
 	jr z, .noFramebufCopy
 	xor a
 	ldh [DRAW_FLAG], a
-	START_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
+	RUN_GDMA VRAM_SCREEN_BUF, SCREEN_BUF, 2048
 .noFramebufCopy:
 	ld hl, FRAME_COUNTER
 	dec [hl]
@@ -493,6 +574,14 @@ VBlankHandler:
 	and $F
 	cp $F ; check if all keys are held
 	jp z, ResetChip8
+	ldh a, [FX0A_KEY_REG]
+	cp FX0A_NOT_ACTIVE_FLAG
+	call nz, CheckFX0A
+	; remove released keys from ignore list
+	ldh a, [IGNORE_KEYS]
+	ld hl, RELEASED_KEYS
+	or [hl]
+	ldh [IGNORE_KEYS], a
 	ldh a, [PRESSED_KEYS]
 	and (PAD_START | PAD_SELECT)
 	cp (PAD_START | PAD_SELECT) ; check if start + select are pressed
@@ -508,9 +597,6 @@ VBlankHandler:
 	bit B_PAD_SELECT, a
 	call nz, DecreaseIPF
 .end:
-	ldh a, [FX0A_KEY_REG]
-	cp FX0A_NOT_ACTIVE_FLAG
-	call nz, CheckFX0A
 	pop hl
 	pop af
 	reti 
@@ -548,7 +634,7 @@ EntryPoint:
 	ldh [rIE], a
 
 	; waiting for vblank to disable lcd
-	halt 
+	SAFE_HALT() 
 	xor a
 	ldh [rLCDC], a
 
@@ -565,8 +651,6 @@ EntryPoint:
 	MEMSET $9800, 0, $400
 	xor a
 	ldh [rVBK], a
-
-	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	; setting palettes
 	ld a, $80
@@ -598,6 +682,8 @@ EntryPoint:
 .after:
 	MEMCPY $9800, TILE_MAP, TILE_MAP_END
 	MEMCPY_1BIT_TILES VRAM_TILES, TILES, TILES_END
+	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
+	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	xor a
 	ldh [KEY_STATE], a
@@ -623,8 +709,6 @@ InitChip8:
 	MEMSET CHIP_RAM_DEAD_BUF, 0, CHIP_RAM_DEADBUF_SIZE
 	MEMSET CHIP_STACK, 0, CHIP_STACK_SIZE
 	MEMSET CHIP_STATE, 0, CHIP_STATE_END - CHIP_STATE
-	MEMSET SCREEN_BUF, 0, SCREEN_BUF_SIZE
-	MEMSET VRAM_SCREEN_BUF, 0, SCREEN_BUF_SIZE
 
 	call LoadChipROM
 	call SetupJumpTables
@@ -636,7 +720,7 @@ InitChip8:
 	ld a, 60
 	ldh [FRAME_COUNTER], a
 
-	ld a, -1
+	ld a, FX0A_NOT_ACTIVE_FLAG
 	ldh [FX0A_KEY_REG], a
 
 	; setting IPF variables
@@ -657,6 +741,7 @@ InitChip8:
 	; setting initial IPF digits on the tilemap.
 	ld hl, ($98 << 8) + IPF_DIGIT0_TILEMAP_NUM
 	ld e, DIGIT0_TILE_NUM
+	WAIT_VRAM_ACCESS()
 	ld a, b
 	add e
 	ld [hl+], a
@@ -723,7 +808,7 @@ InstrLoopEnd:
 	ldh [SOUND_TIMER], a
 	ld a, b
 	ldh [FRAME_DONE_FLAG], a
-	halt ; wait for VBlank
+	SAFE_HALT() ; wait for VBlank
 
 	jr InstrLoop
 
@@ -793,56 +878,9 @@ OP_00EE:
 
 	INSTR_END()
 
-; \1 - 1 if running on GBC, 0 if not.
-MACRO CLEAR_SCREEN
-	IF \1 == 0
-		ld hl, VRAM_SCREEN_BUF
-		; change palette for color id 1 (set chip8 pixel) to be black so screen is seen as clear immediately,
-		; while actual framebuf is being cleared (takes more than half of the frame)
-		ld a, %01101111
-		ldh [rBGP], a
-	ELSE
-		ld hl, SCREEN_BUF
-		xor a
-	ENDC
-	ld c, 8
-
-.clearBlock\@:
-	FOR i, 127
-		IF \1 == 0 && (i % 5) == 0
-			WAIT_VRAM_ACCESS()
-			xor a
-		ENDC
-		ld [hl+], a
-		inc l
-	ENDR
-
-	; need to use 'inc hl' instead of 'inc l', because low byte will overflow.
-	ld [hl+], a
-	inc hl
-
-	dec c
-	jp nz, .clearBlock\@
-
-	IF \1 == 0
-		; switch back to the regular palette.
-		ld a, %01100011
-		ldh [rBGP], a	
-	ELSE
-		inc a ; will become 1
-		ldh [DRAW_FLAG], a
-	ENDC
-
-	INSTR_END()
-ENDM
-
 OP_00E0:
-	ldh a, [IS_GBC]
-	and a
-	jp nz, .gbc
-	CLEAR_SCREEN(0)
-.gbc:
-	CLEAR_SCREEN(1)
+	call ClearChipScreen
+	INSTR_END()
 
 ; \1 = 0 - left, otherwise right; \2 - 1 if running on GBC, 0 if not.
 MACRO SCROLL_HORIZONTAL 
@@ -1238,7 +1276,7 @@ MACRO CHANGE_RES_MODE
 .end\@:
 	ldh a, [QUIRKS]
 	bit LEGACY_SCHIP_FLAG, a
-	jp z, OP_00E0 ; legacy schip doesn't clear screen on mode changes
+	call z, ClearChipScreen ; legacy schip doesn't clear screen on mode changes
 	INSTR_END()
 ENDM
 
@@ -1736,6 +1774,8 @@ MACRO LD_KEY
 	ld b, a
 	ldh a, [KEY_STATE]
 	and b
+	ld hl, IGNORE_KEYS
+	and [hl]
 .end\@:
 ENDM
 	
@@ -1999,42 +2039,36 @@ FX30:
 
 	INSTR_END()
 
+SECTION "FX33BCDTable", ROM0, ALIGN[8]
+FX33_BCD_TABLE:
+	FOR i, 256
+		db i / 100
+		db (i / 10) % 10
+		db i % 10
+	ENDR
+
 FX33:
-	LD_I_MEM_PTR h, l
 	LD_VX()
+	ld d, 0
+	ld e, a
+	ld h, HIGH(FX33_BCD_TABLE)
+	ld l, a
+	add hl, de
+	add hl, de
 
-	ld b, 100
-	ld c, -1
+	LD_I_MEM_PTR d, e
+	ld a, [hl+]
+	ld [de], a
+	inc de
 
-.countHundreds:
-	inc c
-	sub b
-	jr nc, .countHundreds
+	CHECK_MEM_WRITE_OOB d, .end
+	ld a, [hl+]
+	ld [de], a
+	inc de
 
-	add b
-	ld b, a
-
-	ld a, c
-	ld [hl+], a ; Storing hundreds
-	CHECK_MEM_WRITE_OOB(.end)
-
-	ld a, b
-	ld b, 10
-	ld c, -1
-
-.countTenths:
-	inc c
-	sub b
-	jr nc, .countTenths
-
-	add b
-	ld b, a
-
-	ld a, c
-	ld [hl+], a ; Storing tenths
-	CHECK_MEM_WRITE_OOB(.end)
-
-	ld [hl], b ; Storing ones
+	CHECK_MEM_WRITE_OOB d, .end
+	ld a, [hl]
+	ld [de], a
 .end:
 	INSTR_END()
 
@@ -2050,7 +2084,7 @@ MACRO REG_STORE ; \1 = 0 - load from ram, else, store to ram.
 		ld a, [hl+]
 		ldh [c], a
 	ELSE
-		CHECK_MEM_WRITE_OOB(.end\@)
+		CHECK_MEM_WRITE_OOB h, .end\@
 		ldh a, [c]
 		ld [hl+], a
 	ENDC

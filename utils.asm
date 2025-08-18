@@ -32,7 +32,7 @@ Memcpy: ; hl: destination; de: source; bc: source end
 	cp d
 	jr nz, Memcpy
 	ret
-Memcpy1BitTiles: ; hl: destination; de: source; bc: source end. Sets every second byte to $FF.
+Memcpy1BitTiles: ; hl: destination; de: source; bc: source end. Sets every second byte to $FF
 	ld a, [de]
 	ld [hl+], a
 	ld a, $FF
@@ -140,7 +140,8 @@ RNG_STATE:
 	ds 4
 
 ; Taken from: https://gbdev.io/gb-asm-tutorial/cheatsheet.html#generate-random-numbers
-MACRO RAND ; RNG_STATE -> bc
+; RNG_STATE -> ac
+MACRO RAND
 	ld hl, RNG_STATE
   	ld a, [hl]
   	add $B3
@@ -152,10 +153,9 @@ MACRO RAND ; RNG_STATE -> bc
   	ld c, a
   	adc [hl]
   	ld [hl], a
-  	ld b, a
 ENDM
 
-; \1 - table address, 256 byte aligned. index is passed in 'a'.
+; \1 - table address, 256 byte aligned. index is passed in 'a'
 MACRO JP_TABLE ; 
 	add a
 	ld h, HIGH(\1)
@@ -192,4 +192,19 @@ MACRO SAFE_HALT
 	xor a
 	ldh [rIF], a
 	halt
+ENDM
+
+; \1: target
+MACRO JZ_TRY
+    ; try to compute the offset that JR would encode
+    IF ISCONST(\1 - (@ + 2))
+        IF (\1 - (@ + 2)) >= -128 && (\1 - (@ + 2)) <= 127
+            jr z, \1
+        ELSE
+            jp z, \1
+        ENDC
+    ELSE
+        ; can't know distance at assembly time -> use safe form
+        jp z, \1
+    ENDC
 ENDM

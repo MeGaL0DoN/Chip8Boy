@@ -25,18 +25,17 @@ MACRO SKIP_NEXT_INSTR
 	inc CHIP_PC
 ENDM
 
-MACRO LD_N
-	ld a, NN
-	and $F
-ENDM
 MACRO LD_X
-	ld a, OP_HI
 	and $F
 ENDM
 MACRO LD_Y
 	ld a, NN
 	and $F0
 	swap a
+ENDM
+MACRO LD_N
+	ld a, NN
+	and $F
 ENDM
 
 MACRO LD_VX_PTR
@@ -55,6 +54,7 @@ MACRO LD_VX_PTR_SAVE_VY
 	ld l, a
 	ld NN, [hl]
 
+	ld a, OP_HI
 	LD_X()
 	ld l, a
 ENDM
@@ -475,10 +475,11 @@ SetupJumpTables:
 	and a
 	ret nz
 	; rewrite DXYN jump table entry to point to the DMG version, because GBC is default.
-	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
-	ld a, LOW(DXYN_LOW_RES_DMG)
-	ld [hl+], a
-	ld [hl], HIGH(DXYN_LOW_RES_DMG)
+	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 16)
+	ld a, HIGH(DXYN_LOW_RES_DMG)
+	REPT 16
+		ld [hl+], a
+	ENDR
 	ret
 
 LoadChipROM:
@@ -756,17 +757,20 @@ InitChip8:
 	xor a
 	ldh [rIF], a
 	ei
+	ld b, b
 
 MACRO EXEC
-	; loading first byte of the opcode and saving it
+	; loading first byte of the opcode and incrementing pc
 	ld a, [CHIP_PC]
-	ld OP_HI, a
 	inc CHIP_PC
 
-	; jumping to the opcode handler based on the first nibble.
-	and $F0
-	swap a
-	JP_TABLE(MAIN_JUMP_TABLE)
+	; jumping to the opcode handler based on the first byte
+	; (table entries are high address bytes and low byte is 0 for all)
+	ld h, HIGH(MAIN_JUMP_TABLE)
+	ld l, a
+	ld h, [hl]
+	ld l, 0
+	jp hl
 ENDM
 
 InstrLoop:
@@ -778,24 +782,20 @@ MACRO DISPATCH
 	jr z, .instrBlockEnd\@
 	EXEC()
 .instrBlockEnd\@:
-	jp InstrBlockEnd
-ENDM
-MACRO DISPATCH_SHORT
-	ld hl, INSTR_COUNTER 
-	dec [hl] 
-	jp nz, InstrLoop
-	jp InstrBlockEnd
+	rst InstrBlockEnd
 ENDM
 
+SECTION "InstrBlockEndHandler", ROM0[$0008]
 InstrBlockEnd:
+	pop af ; discard return address
 	ldh a, [IPF_PER_BLOCK]
 	ld [hl], a ; reload number of instructions per block
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
-	jr nz, InstrLoop
+	jp nz, InstrLoop
 	ldh a, [IPF_BLOCKS_NUM]
 	ld [hl], a ; reload number of instruction blocks
-InstrLoopEnd:
+FrameEnd:
 	ld b, 1
 	ldh a, [DELAY_TIMER]
 	sub b
@@ -809,7 +809,7 @@ InstrLoopEnd:
 	ldh [FRAME_DONE_FLAG], a
 	SAFE_HALT() ; wait for VBlank
 
-	jr InstrLoop
+	jp InstrLoop
 
 SECTION "InvalidInstrHandler", ROM0[$0000]
 InvalidInstr:
@@ -820,20 +820,39 @@ InvalidInstr:
 
 SECTION "MainJumpTable", WRAM0, ALIGN[8]
 MAIN_JUMP_TABLE:
-	ds 32
+	ds 256 ;32
+
+MACRO FILL_NIBBLE
+	REPT 16
+		db HIGH(\1)
+	ENDR
+ENDM
 
 SECTION "MainJumpTableROM", ROM0
 MAIN_JUMP_TABLE_ROM:
-    dw Case0, Case1, Case2, Case3, Case4, Case5, Case6, Case7,
-    dw Case8, Case9, CaseA, CaseB, CaseC, DXYN_LOW_RES_GBC, CaseE, CaseF  
+	FILL_NIBBLE(Case0)
+	FILL_NIBBLE(Case1)
+	FILL_NIBBLE(Case2)
+	FILL_NIBBLE(Case3)
+	FILL_NIBBLE(Case4)	
+	FILL_NIBBLE(Case5)
+	FILL_NIBBLE(Case6)
+	FILL_NIBBLE(Case7)
+	FILL_NIBBLE(Case8)
+	FILL_NIBBLE(Case9)
+	FILL_NIBBLE(CaseA)
+	FILL_NIBBLE(CaseB)
+	FILL_NIBBLE(CaseC)
+	FILL_NIBBLE(DXYN_LOW_RES_GBC)
+	FILL_NIBBLE(CaseE)
+	FILL_NIBBLE(CaseF)
 MAIN_JUMP_TABLE_ROM_END:
 
+SECTION "Case0", ROM0, ALIGN[8]
 Case0:
-	; if first byte is not zero, instruction is invalid.
-	ld a, OP_HI
+	; if second nibble is not zero too, instruction is invalid.
 	and a
 	jr nz, .invalid
-
 	LD_OP_LOW()
 
 	cp $EE
@@ -885,7 +904,7 @@ OP_00EE:
 
 OP_00E0:
 	call ClearChipScreen
-	DISPATCH_SHORT()
+	DISPATCH()
 
 ; \1 = 0 - left, otherwise right; \2 - 1 if running on GBC, 0 if not.
 MACRO SCROLL_HORIZONTAL 
@@ -991,7 +1010,7 @@ MACRO SCROLL_HORIZONTAL
 
 	pop CHIP_PC
 	; early instruction loop break, because scroll takes big part of the frame.
-	jp InstrLoopEnd
+	jp FrameEnd
 
 .highResMode\@:
 	REPT 8
@@ -1066,7 +1085,7 @@ MACRO SCROLL_HORIZONTAL
 	jr nz, .clearHalfTile\@
 
 	pop CHIP_PC
-	jp InstrLoopEnd
+	jp FrameEnd
 ENDM
 
 OP_00FB: ; scroll right 4 pixels 
@@ -1225,10 +1244,10 @@ MACRO SCROLL_VERTICAL
 
 	pop CHIP_PC
 	; early instruction loop break, because scroll takes big part of the frame.
-	jp InstrLoopEnd
+	jp FrameEnd
 
 .scroll0\@:
-	DISPATCH_SHORT()
+	DISPATCH()
 ENDM
 
 OP_00CN: ; scroll down N pixels
@@ -1259,35 +1278,30 @@ MACRO CHANGE_RES_MODE
 	ldh [HIGH_RES_MODE_FLAG], a
 
 	; rewriting jump table entry for DXYN to point to the new version.
-	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 2)
+	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 16)
 	ldh a, [IS_GBC]
 	and a
 	jr nz, .GBC\@
 	IF \1 == 0
-		ld a, LOW(DXYN_LOW_RES_DMG)
-		ld [hl+], a
-		ld [hl], HIGH(DXYN_LOW_RES_DMG)
+		ld a, HIGH(DXYN_LOW_RES_DMG)
 	ELSE
-		ld a, LOW(DXYN_HIGH_RES_DMG)
-		ld [hl+], a
-		ld [hl], HIGH(DXYN_HIGH_RES_DMG)
+		ld a, HIGH(DXYN_HIGH_RES_DMG)
 	ENDC
 	jr .end\@
 .GBC\@:
 	IF \1 == 0
-		ld a, LOW(DXYN_LOW_RES_GBC)
-		ld [hl+], a
-		ld [hl], HIGH(DXYN_LOW_RES_GBC)
+		ld a, HIGH(DXYN_LOW_RES_GBC)
 	ELSE
-		ld a, LOW(DXYN_HIGH_RES_GBC)
-		ld [hl+], a
-		ld [hl], HIGH(DXYN_HIGH_RES_GBC)
+		ld a, HIGH(DXYN_HIGH_RES_GBC)
 	ENDC
 .end\@:
+	REPT 16
+		ld [hl+], a
+	ENDR
 	ldh a, [QUIRKS]
 	bit LEGACY_SCHIP_FLAG, a
 	call z, ClearChipScreen ; legacy schip doesn't clear screen on mode changes
-	DISPATCH_SHORT()
+	DISPATCH()
 ENDM
 
 OP_00FE:
@@ -1295,14 +1309,21 @@ OP_00FE:
 OP_00FF:
 	CHANGE_RES_MODE(1)
 
-Case1: 
-OP_1NNN:
+MACRO JMP
+	ld OP_HI, a
 	LD_OP_LOW()
 	ld CHIP_PC_LO, a
 	LD_PC_HI_OP_HI()
 
 	DISPATCH()
+ENDM
 
+SECTION "Case1", ROM0, ALIGN[8]
+Case1: 
+OP_1NNN:
+	JMP()
+
+SECTION "Case2", ROM0, ALIGN[8]
 Case2:
 OP_2NNN:
 	; overflow check and sp update
@@ -1312,18 +1333,14 @@ OP_2NNN:
 
 	; storing current pc to the stack
 	push CHIP_PC
-
 	; setting pc to the new value
-	LD_OP_LOW()
-	ld CHIP_PC_LO, a
-	LD_PC_HI_OP_HI()
-
-	DISPATCH()
+	JMP()
 
 .overflow:
 	ld b, b
 	jr @
 
+SECTION "Case3", ROM0, ALIGN[8]
 Case3:
 OP_3XNN:
 	LD_VX_PTR()
@@ -1335,6 +1352,7 @@ OP_3XNN:
 	inc CHIP_PC
 	DISPATCH()
 
+SECTION "Case4", ROM0, ALIGN[8]
 Case4:
 OP_4XNN:
 	LD_VX_PTR()
@@ -1346,8 +1364,10 @@ OP_4XNN:
 	inc CHIP_PC
 	DISPATCH()
 
+SECTION "Case5", ROM0, ALIGN[8]
 Case5:
 OP_5XY0:
+	ld OP_HI, a
 	LD_OP_LOW()
 	ld NN, a
 	and $F
@@ -1365,6 +1385,7 @@ OP_5XY0:
 .invalid:
 	rst InvalidInstr
 
+SECTION "Case6", ROM0, ALIGN[8]
 Case6:
 OP_6XNN:
 	LD_VX_PTR()
@@ -1374,6 +1395,7 @@ OP_6XNN:
 	inc CHIP_PC
 	DISPATCH()
 
+SECTION "Case7", ROM0, ALIGN[8]
 Case7:
 OP_7XNN:
 	LD_VX_PTR()
@@ -1384,7 +1406,9 @@ OP_7XNN:
 	inc CHIP_PC
 	DISPATCH()
 
+SECTION "Case8", ROM0, ALIGN[8]
 Case8:
+	ld OP_HI, a
 	LD_OP_LOW()
 	inc CHIP_PC
 
@@ -1428,7 +1452,7 @@ _8XY1:
 	xor a
 	ld [VF], a
 
-	DISPATCH_SHORT()
+	DISPATCH()
 _8XY2:
 	LD_VX_SAVE_VY()
 	and NN
@@ -1438,7 +1462,7 @@ _8XY2:
 	xor a
 	ld [VF], a
 
-	DISPATCH_SHORT()
+	DISPATCH()
 _8XY3:
 	LD_VX_SAVE_VY()
 	xor NN
@@ -1448,7 +1472,7 @@ _8XY3:
 	xor a
 	ld [VF], a
 
-	DISPATCH_SHORT()
+	DISPATCH()
 
 MACRO SET_VF_CARRY
 	sbc a
@@ -1482,15 +1506,7 @@ _8XY6:
 	ld [hl], NN
 	SET_VF_CARRY()
 
-	DISPATCH_SHORT()
-_8XYE:
-	; shifting quirk
-	LD_VX_PTR_SAVE_VY()
-	sla NN
-	ld [hl], NN
-	SET_VF_CARRY()
-
-	DISPATCH_SHORT()
+	DISPATCH()
 _8XY7:
 	LD_VX_PTR_SAVE_VY()
 	ld a, NN
@@ -1499,11 +1515,21 @@ _8XY7:
 	SET_VF_BORROW()
 
 	DISPATCH()
+_8XYE:
+	; shifting quirk
+	LD_VX_PTR_SAVE_VY()
+	sla NN
+	ld [hl], NN
+	SET_VF_CARRY()
 
-STATIC_ASSERT (_8XY7 - _8XYN_Invalid) < 256, STRFMT("8XYN handlers exceed page! (%d bytes)", _8XY7 - _8XYN_Invalid)
+	DISPATCH()
 
+STATIC_ASSERT (_8XYE - _8XYN_Invalid) < 256, STRFMT("8XYN handlers exceed page! (%d bytes)", _8XYE - _8XYN_Invalid)
+
+SECTION "Case9", ROM0, ALIGN[8]
 Case9:
 OP_9XY0: 
+	ld OP_HI, a
 	LD_OP_LOW()
 	ld NN, a
 	and $F
@@ -1521,20 +1547,25 @@ OP_9XY0:
 .invalid:
 	rst InvalidInstr
 
+SECTION "CaseA", ROM0, ALIGN[8]
 CaseA: 
 OP_ANNN:
-	LD_OP_LOW()
-	ldh [I_REG], a
-	ld a, OP_HI
+	; set high byte
 	and $F
 	add HIGH(CHIP_RAM)
 	ldh [I_REG + 1], a
 
+	; set low byte
+	LD_OP_LOW()
+	ldh [I_REG], a
+
 	inc CHIP_PC
 	DISPATCH()
 	
+SECTION "CaseB", ROM0, ALIGN[8]
 CaseB:
 OP_BNNN: ; Quirk off, jump to V[0] + NNN
+	ld OP_HI, a
 	LD_OP_LOW()
 	ld hl, V0
 	add [hl]
@@ -1549,11 +1580,14 @@ OP_BNNN: ; Quirk off, jump to V[0] + NNN
 
 	DISPATCH()
 
+SECTION "CaseC", ROM0, ALIGN[8]
 CaseC:
 OP_CXNN: ; V[x] = rand() & NN
+	ld OP_HI, a
 	RAND()
 	xor c
 	ld c, a
+	ld a, OP_HI
 	LD_VX_PTR()
 	LD_OP_LOW()
 	and c
@@ -1599,7 +1633,6 @@ DXYN_HIRES_MASK_LOOKUP:
 		db (%10000000 >> (i & 7))
 	ENDR
 
-CaseD: 
 OP_DXYN:
 	; \1 - 1 if running on GBC, 0 if not
 	; \2 - 1 if superchip hires, 0 if not 
@@ -1651,11 +1684,9 @@ OP_DXYN:
 		IF \1 == 0 
 			ldh a, [temp4]
 			and a
-			jr nz, .collision\@
-			ld [VF], a
-			DISPATCH()
-		.collision\@:
+			jr z, .noCollision\@
 			ld a, 1
+		.noCollision\@:
 			ld [VF], a
 		ENDC
 		DISPATCH()
@@ -1763,12 +1794,12 @@ OP_DXYN:
 				ld c, a ; x-offset
 			ENDC
         	DXYN_PROCESS_PIXEL \1, \2, (i == 0 && \3 != 16)
-			IF \3 != 16
+			IF i != 0 && \3 != 16
 				ld a, e
 				and a
 			ENDC
-    	.skipPixel\@:
-			IF \3 != 16
+		.skipPixel\@:
+			IF i != 0 && \3 != 16
 				JZ_TRY spriteByteEnd
 			ENDC
     	ENDR
@@ -1799,10 +1830,14 @@ OP_DXYN:
         		jr nc, .skipPixel\@
 				ld c, a
         		DXYN_PROCESS_PIXEL \1, \2, i == 0
-				ld a, e
-				and a
-    		.skipPixel\@:
-				JZ_TRY xClip
+				IF i != 0
+					ld a, e
+					and a
+				ENDC
+			.skipPixel\@:
+				IF i != 0
+					JZ_TRY xClip
+				ENDC
     		ENDR
 		ENDC
 
@@ -1834,6 +1869,7 @@ OP_DXYN:
 		ENDC
 		ld NN, a
 
+		ld a, OP_HI
 		LD_X()
 		ld l, a
 		ld a, [hl]
@@ -1889,6 +1925,7 @@ OP_DXYN:
 
 	; \1 - 1 if running on GBC, 0 if not. \2 - 1 if superchip hires, 0 if not
 	MACRO DXYN
+		ld OP_HI, a
 		LD_OP_LOW()
 		inc CHIP_PC
 		push CHIP_PC
@@ -1917,31 +1954,38 @@ OP_DXYN:
 		DRAW_SPRITE \1, \2, 16
 	ENDM
 
+SECTION "DXYN_LOW_RES_DMG", ROM0, ALIGN[8]
 DXYN_LOW_RES_DMG:
 	DXYN 0, 0
+
+SECTION "DXYN_HIGH_RES_DMG", ROM0, ALIGN[8]
 DXYN_HIGH_RES_DMG:
 	DXYN 0, 1
+
+SECTION "DXYN_LOW_RES_GBC", ROM0, ALIGN[8]
 DXYN_LOW_RES_GBC:
 	DXYN 1, 0
+
+SECTION "DXYN_HIGH_RES_GBC", ROM0, ALIGN[8]
 DXYN_HIGH_RES_GBC:
 	DXYN 1, 1
 
 MACRO LD_KEY
+	ld a, OP_HI
 	LD_VX()
 	and $F
 	add LOW(KEY_MAP)
 	ld c, a
 	ldh a, [c]
-	cp -1 ; key is not mapped
-	jr z, .end\@
 	ld hl, KEY_STATE
 	and [hl]
 	inc l ; KEY_STATE + 1 is IGNORE_KEYS
 	and [hl]
-.end\@:
 ENDM
 	
+SECTION "CaseE", ROM0, ALIGN[8]
 CaseE: 
+	ld OP_HI, a
 	LD_OP_LOW()
 	inc CHIP_PC
 	cp $A1
@@ -1966,16 +2010,20 @@ CaseE:
 .invalid:
 	rst InvalidInstr
 	
+SECTION "CaseF", ROM0, ALIGN[8]
 CaseF:
+	ld OP_HI, a
 	LD_OP_LOW()
 	inc CHIP_PC
 
 	bit 7, a
 	jr nz, .bit7Set
-	JP_TABLE(FXJumpTable)
+	JP_TABLE(FXJumpTable)	
+.invalid:
+	rst InvalidInstr
 .bit7Set:
 	cp $85
-	jr nz, CaseE.invalid
+	jr nz, .invalid
 
 ; Matching on 7 low bits of the opcode, so 128 entries fit in a page.
 SECTION "FX Jump Table", ROM0, ALIGN[8]
@@ -2006,6 +2054,7 @@ FXJumpTable:
 
 ; \1 = 0 - load from flags; else, store to flags.
 MACRO SCHIP_RPL_STORE 
+	ld a, OP_HI
 	LD_VX()
 	and $7
 	ld b, a
@@ -2026,7 +2075,7 @@ MACRO SCHIP_RPL_STORE
 	dec b
 	jr nz, .copyLoop\@
 
-	DISPATCH_SHORT()
+	DISPATCH()
 ENDM
 
 FX85:
@@ -2036,6 +2085,7 @@ FX75:
 	SCHIP_RPL_STORE(1)
 
 FX07:
+	ld a, OP_HI
 	LD_VX_PTR()
 	ldh a, [DELAY_TIMER]
 	ld [hl], a
@@ -2046,6 +2096,7 @@ FX0A:
 	ldh a, [FX0A_KEY_REG]
 	cp FX0A_NOT_ACTIVE_FLAG
 	jr nz, .skipFX0AInit
+	ld a, OP_HI
 	LD_X()
 	ldh [FX0A_KEY_REG], a
 .skipFX0AInit:
@@ -2054,26 +2105,29 @@ FX0A:
 	; PC -= 2
 	dec CHIP_PC
 	dec CHIP_PC
-	; jump straight to the frame end to limit CPU usage while waiting for key.
-	jp InstrLoopEnd
+	; limit CPU usage while waiting for key:
+	jp FrameEnd
 .FX0ADone:
 	ld a, FX0A_NOT_ACTIVE_FLAG
 	ldh [FX0A_KEY_REG], a
-	DISPATCH_SHORT()
+	DISPATCH()
 
 FX15:
+	ld a, OP_HI
 	LD_VX()
 	ldh [DELAY_TIMER], a
 
 	DISPATCH()
 
 FX18:
+	ld a, OP_HI
 	LD_VX()
 	ldh [SOUND_TIMER], a
 
 	DISPATCH()
 
 FX1E:
+	ld a, OP_HI
 	LD_VX_PTR()
 	ld c, LOW(I_REG)
 
@@ -2095,6 +2149,7 @@ FX1E:
 	jr .storeHigh
 
 FX29:
+	ld a, OP_HI
 	LD_VX()
 	and $F
 	ld b, a
@@ -2110,6 +2165,7 @@ FX29:
 	DISPATCH()
 
 FX30:
+	ld a, OP_HI
 	LD_VX()
 	and $F
 	ld b, a
@@ -2128,6 +2184,7 @@ FX30:
 	DISPATCH()
 
 FX33:
+	ld a, OP_HI
 	LD_VX()
 
 	ld hl, I_REG
@@ -2170,6 +2227,7 @@ FX33:
 ; \1 = 0 - load from ram, else, store to ram.
 MACRO REG_STORE 
 	push CHIP_PC
+	ld a, OP_HI
 	LD_X()
 	ld b, a 
 	inc b ; V[x] is included

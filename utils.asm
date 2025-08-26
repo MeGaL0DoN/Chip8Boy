@@ -1,83 +1,74 @@
-MACRO MEMCPY
+MACRO MEMSET ; \3: size
 	ld hl, \1 
-	ld de, \2 
-	ld bc, \3 
-	call Memcpy
+	ld a, \2
+	ld bc, ((((\3) + 255) / 256) << 8) | ((\3) % 256)  
+	rst Memset
 ENDM
 
-MACRO MEMCPY_1BIT_TILES
+MACRO MEMCPY ; \3: source end
+    ld de, \1
+    ld hl, \2
+    ld bc, ((((\3) - (\2) + 255) / 256) << 8) | (((\3) - (\2)) % 256)
+    rst Memcpy
+ENDM
+
+MACRO MEMCPY_1BIT_TILES ; \3: source end
 	ld hl, \1 
 	ld de, \2 
-	ld bc, \3 
+	ld bc, ((((\3) - (\2) + 255) / 256) << 8) | (((\3) - (\2)) % 256) 
 	call Memcpy1BitTiles
 ENDM
 
-MACRO MEMSET
-	ld hl, \1 
-	ld e, \2
-	ld bc, \1 + \3 ; Destination end (because instead size is passed in \3)
-	call Memset
-ENDM
-
-SECTION "Utils", ROM0
-Memcpy: ; hl: destination; de: source; bc: source end
-	ld a, [de]
+SECTION "Memset", ROM0[$0008]
+Memset: ; hl: destination; a: value to set; c: len % 256, b: (len + 255) / 256
 	ld [hl+], a
+	dec c
+	jr nz, Memset
+	dec b
+	jr nz, Memset
+	ret
+SECTION "Memcpy", ROM0[$0010]
+Memcpy: ; de: destination; hl: source; c: len % 256, b: (len + 255) / 256
+	ld a, [hl+]
+	ld [de], a
 	inc de
-
-	ld a, c
-	cp e
+	dec c
 	jr nz, Memcpy
-	ld a, b
-	cp d
+	dec b
 	jr nz, Memcpy
 	ret
-Memcpy1BitTiles: ; hl: destination; de: source; bc: source end. Sets every second byte to $FF
+
+SECTION "Utils", ROM0
+; sets every second byte to $FF
+Memcpy1BitTiles: ; hl: destination; de: source; c: len % 256, b: (len + 255) / 256
 	ld a, [de]
 	ld [hl+], a
 	ld a, $FF
 	ld [hl+], a
 	inc de
-
-	ld a, c
-	cp e
+	dec c
 	jr nz, Memcpy1BitTiles
-	ld a, b
-	cp d
+	dec b
 	jr nz, Memcpy1BitTiles
-	ret
-Memset: ; hl: destination; bc: destination end; e: value to set
-	ld a, e
-	ld [hl+], a
-
-	ld a, c
-	cp l
-	jr nz, Memset
-	ld a, b
-	cp h
-	jr nz, Memset
 	ret
 
 ConvertToBCD3: ; hl -> bc
-	ld bc, $FF64 ; b = -1, c = 100
+	ld de, $FF9C ; de = -100
+	ld b, d ; b = -1
 .countHundreds:
 	inc b
+	add hl, de
+	jr c, .countHundreds
 	ld a, l
-	sub c
-	ld l, a
-	ld a, h
-	sbc 0
-	ld h, a
-	jr nc, .countHundreds
-	ld a, l
-	add c
-	ld c, -1
+	add 100
+	ld c, d ; c = -1
+	ld e, 10
 .countTenths:
 	inc c
-	sub 10
+	sub e
 	jr nc, .countTenths
 	swap c
-	add 10
+	add e
 	or c
 	ld c, a
 	ret
@@ -93,15 +84,14 @@ Mul8x8: ; b x c -> hl
 	ld e, c
 	ld c, b
 .loop
-	bit 0, c
-	jr z, .skipAdd
+	srl c
+	jr nc, .skipAdd
 	add hl, de
 .skipAdd
+	ret z 
 	sla e
 	rl d
-	srl c
-	jr nz, .loop
-	ret
+	jr .loop
 	
 UpdateKeys:
 	MACRO readNibble

@@ -174,10 +174,10 @@ temp7:
 	ds 1
 
 SECTION "Stack", WRAM0
-	ds (CHIP_STACK_SIZE * 2) + 64 ; 32 bytes for chip8 + 64 for the program
+	ds (CHIP_STACK_SIZE * 2) + (64 * 2) ; 16 entries for chip8 stack + 64 for the program
 STACK_TOP:
 
-SECTION "ChipRAM", WRAMX[$D000]
+SECTION "ChipRAM", WRAMX
 CHIP_RAM:
 	ds CHIP_RAM_SIZE
 CHIP_RAM_END:
@@ -469,20 +469,59 @@ CheckFX0A:
 	pop bc
 	ret
 
-SetupJumpTables:
+MACRO SETUP_JUMP_TABLES
 	MEMCPY MAIN_JUMP_TABLE, MAIN_JUMP_TABLE_ROM, MAIN_JUMP_TABLE_ROM_END
-	ldh a, [IS_GBC]
-	and a
-	ret nz
-	; rewrite DXYN jump table entry to point to the DMG version, because GBC is default.
-	ld hl, (HIGH(MAIN_JUMP_TABLE) << 8) | ($D * 16)
-	ld a, HIGH(DXYN_LOW_RES_DMG)
+	MEMCPY _8XYN_JUMP_TABLE, _8XYN_JUMP_TABLE_ROM, _8XYN_JUMP_TABLE_ROM_END
+	MEMCPY _8XYN_HANDLERS, _8XYN_DEFAULT_HANDLERS, _8XYN_DEFAULT_HANDLERS_END
+	MEMCPY FX_JUMP_TABLE, FX_JUMP_TABLE_ROM, FX_JUMP_TABLE_ROM_END
+	ldh a, [QUIRKS]
+	ld b, a
+	bit MEM_INCREMENT_QUIRK, b
+	jr nz, .memIncrQuirkOn
+	ld hl, (HIGH(FX_JUMP_TABLE) << 8) | ($55 * 2)
+	ld a, LOW(FX55_MEM_INCREMENT_OFF)
+	ld [hl+], a
+	ld [hl], HIGH(FX55_MEM_INCREMENT_OFF)
+	ld l, ($65 * 2)
+	ld a, LOW(FX65_MEM_INCREMENT_OFF)
+	ld [hl+], a
+	ld [hl], HIGH(FX65_MEM_INCREMENT_OFF)
+.memIncrQuirkOn:
+	bit VF_RESET_QUIRK, b
+	jr nz, .vfResetQuirkOn
+	MEMCPY (_8XYN_HANDLERS + _8XY1 - _8XYN_DEFAULT_HANDLERS), _8XYN_VF_RESET_OFF_HANDLERS, _8XYN_VF_RESET_OFF_HANDLERS_END, 
+	ldh a, [QUIRKS]
+	ld b, a
+.vfResetQuirkOn
+	bit SHIFTING_QUIRK, b
+	jr z, .shiftingQuirkOff
+	MEMCPY (_8XYN_HANDLERS + _8XY6 - _8XYN_DEFAULT_HANDLERS), _8XY6_SHIFTING_ON, _8XY6_SHIFTING_ON_END
+	MEMCPY (_8XYN_HANDLERS + _8XYE - _8XYN_DEFAULT_HANDLERS), _8XYE_SHIFTING_ON, _8XYE_SHIFTING_ON_END
+	ldh a, [QUIRKS]
+	ld b, a
+.shiftingQuirkOff:
+	ld h, HIGH(MAIN_JUMP_TABLE)
+	bit JUMPING_QUIRK, b
+	jr z, .jumpQuirkOff
+	ld l, ($B * 16)
+	ld a, HIGH(OP_BNNN_JUMPING_ON)
 	REPT 16
 		ld [hl+], a
 	ENDR
-	ret
+.jumpQuirkOff:
+	ldh a, [IS_GBC]
+	and a
+	jr nz, .end
+	; rewrite DXYN jump table entry to point to the DMG version, because GBC is default.
+	ld l, ($D * 16)
+	ld a, HIGH(OP_DXYN_LORES_DMG)
+	REPT 16
+		ld [hl+], a
+	ENDR
+.end:
+ENDM
 
-LoadChipROM:
+MACRO LOAD_CHIP_ROM
 	ldh a, [ROM_CONFIG_PTR]
 	ld l, a
 	ldh a, [ROM_CONFIG_PTR + 1]
@@ -518,24 +557,19 @@ LoadChipROM:
 	ld a, [hl+]
 	ldh [QUIRKS], a
 
-	; loading rom size to bc
+	; loading rom size to bc, and converting it to format memcpy uses (if low % 256 != 0, increment high)
 	ld a, [hl+]
+	and a
 	ld c, a
 	ld a, [hl+]
 	ld b, a
-
-	; setting source start ptr (de)
-	ld d, h
-	ld e, l
-
-	; setting source end ptr (bc)
-	add hl, bc
-	ld b, h
-	ld c, l
-	
-	; setting dest ptr and tail-calling memcpy
-	ld hl, CHIP_RAM + $200 
-	jp Memcpy
+	jr z, .noInc
+    inc b
+.noInc:
+	; setting dest ptr and calling memcpy
+	ld de, CHIP_RAM + $200 
+	rst Memcpy
+ENDM
 
 SECTION "VBlank Handler", ROM0[$0040]
 VBlankHandler:
@@ -636,7 +670,6 @@ EntryPoint:
 	ldh [rKEY1], a
 	stop
 	; set attribute map to zero (use palette 0 and tile bank 0, no flips)
-	set 0, a
 	ldh [rVBK], a
 	MEMSET $9800, 0, $400
 	xor a
@@ -712,8 +745,8 @@ InitChip8:
 	ld a, FX0A_NOT_ACTIVE_FLAG
 	ldh [FX0A_KEY_REG], a
 
-	call LoadChipROM
-	call SetupJumpTables
+	LOAD_CHIP_ROM()
+	SETUP_JUMP_TABLES()
 
 	; setting IPF variables
 	ldh a, [IPF_PER_BLOCK]
@@ -757,7 +790,6 @@ InitChip8:
 	xor a
 	ldh [rIF], a
 	ei
-	ld b, b
 
 MACRO EXEC
 	; loading first byte of the opcode and incrementing pc
@@ -776,25 +808,6 @@ ENDM
 InstrLoop:
 	EXEC()
 
-MACRO DISPATCH
-	ld hl, INSTR_COUNTER 
-	dec [hl]
-	jr z, .instrBlockEnd\@
-	EXEC()
-.instrBlockEnd\@:
-	rst InstrBlockEnd
-ENDM
-
-SECTION "InstrBlockEndHandler", ROM0[$0008]
-InstrBlockEnd:
-	pop af ; discard return address
-	ldh a, [IPF_PER_BLOCK]
-	ld [hl], a ; reload number of instructions per block
-	ld hl, INSTR_BLOCK_COUNTER
-	dec [hl]
-	jp nz, InstrLoop
-	ldh a, [IPF_BLOCKS_NUM]
-	ld [hl], a ; reload number of instruction blocks
 FrameEnd:
 	ld b, 1
 	ldh a, [DELAY_TIMER]
@@ -809,18 +822,39 @@ FrameEnd:
 	ldh [FRAME_DONE_FLAG], a
 	SAFE_HALT() ; wait for VBlank
 
-	jp InstrLoop
+	jr InstrLoop
+
+MACRO DISPATCH
+	ld hl, INSTR_COUNTER 
+	dec [hl]
+	jr z, .instrBlockEnd\@
+	EXEC()
+.instrBlockEnd\@:
+	rst InstrBlockEnd
+ENDM
+
+SECTION "InstrBlockEndHandler", ROM0[$0020]
+InstrBlockEnd:
+	pop af ; discard return address
+	ldh a, [IPF_PER_BLOCK]
+	ld [hl], a ; reload number of instructions per block
+	ld hl, INSTR_BLOCK_COUNTER
+	dec [hl]
+	jp nz, InstrLoop
+	ldh a, [IPF_BLOCKS_NUM]
+	ld [hl], a ; reload number of instruction blocks
+	jp FrameEnd
 
 SECTION "InvalidInstrHandler", ROM0[$0000]
 InvalidInstr:
 	ld b, b
 	jr @
 
-;; Instruction decoding, table for matching on first nibble
+;; Instruction decoding, table for matching on the first byte
 
 SECTION "MainJumpTable", WRAM0, ALIGN[8]
 MAIN_JUMP_TABLE:
-	ds 256 ;32
+	ds 256
 
 MACRO FILL_NIBBLE
 	REPT 16
@@ -830,7 +864,10 @@ ENDM
 
 SECTION "MainJumpTableROM", ROM0
 MAIN_JUMP_TABLE_ROM:
-	FILL_NIBBLE(Case0)
+	db HIGH(Case0)
+	REPT 15
+		db HIGH(InvalidInstr)
+	ENDR
 	FILL_NIBBLE(Case1)
 	FILL_NIBBLE(Case2)
 	FILL_NIBBLE(Case3)
@@ -841,29 +878,43 @@ MAIN_JUMP_TABLE_ROM:
 	FILL_NIBBLE(Case8)
 	FILL_NIBBLE(Case9)
 	FILL_NIBBLE(CaseA)
-	FILL_NIBBLE(CaseB)
+	FILL_NIBBLE(OP_BNNN_JUMPING_OFF)
 	FILL_NIBBLE(CaseC)
-	FILL_NIBBLE(DXYN_LOW_RES_GBC)
+	FILL_NIBBLE(OP_DXYN_LORES_GBC)
 	FILL_NIBBLE(CaseE)
 	FILL_NIBBLE(CaseF)
 MAIN_JUMP_TABLE_ROM_END:
 
 SECTION "Case0", ROM0, ALIGN[8]
 Case0:
-	; if second nibble is not zero too, instruction is invalid.
-	and a
-	jr nz, .invalid
 	LD_OP_LOW()
-
 	cp $EE
-	jr z, OP_00EE
-	; 00EE is return opcode so pc will be overwritten anyway, so no need to increment for it
-	inc CHIP_PC 
+	jr nz, .after
+
+.OP_00EE:
+	; underflow check and sp update
+	ldh a, [CHIP_SP]
+	cp (CHIP_STACK_SIZE + 1)
+	jr z, .underflow
+	inc a
+	ldh [CHIP_SP], a
+
+	; restoring pc from the stack and incrementing, because pc - 1 is saved in 2NNN
+	pop CHIP_PC
+	inc CHIP_PC
+
+	DISPATCH()
+.underflow:
+	ld b, b
+	jr @
+
+.after:
+	inc CHIP_PC
 	cp $E0
 	jr z, OP_00E0
 	ld NN, a
 	sub $FB
-	jp z, OP_00FB
+	jr z, OP_00FB
 	dec a ; $FC
 	jp z, OP_00FC
 	dec a ; $FD
@@ -881,26 +932,7 @@ Case0:
 	cp $B0
 	jp z, OP_00BN
 	
-.invalid:
 	rst InvalidInstr
-
-OP_00EE:
-	; underflow check and sp update
-	ldh a, [CHIP_SP]
-	cp (CHIP_STACK_SIZE + 1)
-	jr z, .underflow
-	inc a
-	ldh [CHIP_SP], a
-
-	; restoring pc from the stack and incrementing, because pc - 1 is saved in 2NNN
-	pop CHIP_PC
-	inc CHIP_PC
-
-	DISPATCH()
-
-.underflow:
-	ld b, b
-	jr @
 
 OP_00E0:
 	call ClearChipScreen
@@ -1283,16 +1315,16 @@ MACRO CHANGE_RES_MODE
 	and a
 	jr nz, .GBC\@
 	IF \1 == 0
-		ld a, HIGH(DXYN_LOW_RES_DMG)
+		ld a, HIGH(OP_DXYN_LORES_DMG)
 	ELSE
-		ld a, HIGH(DXYN_HIGH_RES_DMG)
+		ld a, HIGH(OP_DXYN_HIRES_DMG)
 	ENDC
 	jr .end\@
 .GBC\@:
 	IF \1 == 0
-		ld a, HIGH(DXYN_LOW_RES_GBC)
+		ld a, HIGH(OP_DXYN_LORES_GBC)
 	ELSE
-		ld a, HIGH(DXYN_HIGH_RES_GBC)
+		ld a, HIGH(OP_DXYN_HIRES_GBC)
 	ENDC
 .end\@:
 	REPT 16
@@ -1412,7 +1444,7 @@ Case8:
 	LD_OP_LOW()
 	inc CHIP_PC
 
-	ld h, HIGH(_8XYNJumpTable)
+	ld h, HIGH(_8XYN_JUMP_TABLE)
 	ld l, a
 	ld l, [hl]
 	inc h
@@ -1423,17 +1455,21 @@ Case8:
 	jp hl
 
 ; short jump table (entries are 1 byte low address bytes for handlers in the next page)
-SECTION "8XYN Jump Table", ROM0, ALIGN[8]
-_8XYNJumpTable:
+SECTION "8XYNJumpTableROM", ROM0
+_8XYN_JUMP_TABLE_ROM:
 	REPT 16
-		db LOW(_8XY0), LOW(_8XY1), LOW(_8XY2), LOW(_8XY3)
-		db LOW(_8XY4), LOW(_8XY5), LOW(_8XY6), LOW(_8XY7)
-		db LOW(_8XYN_Invalid), LOW(_8XYN_Invalid), LOW(_8XYN_Invalid)
-		db LOW(_8XYN_Invalid), LOW(_8XYN_Invalid), LOW(_8XYN_Invalid)
-		db LOW(_8XYE), LOW(_8XYN_Invalid)
+		db _8XY0 - _8XYN_DEFAULT_HANDLERS, _8XY1 - _8XYN_DEFAULT_HANDLERS,
+		db _8XY2 - _8XYN_DEFAULT_HANDLERS, _8XY3 - _8XYN_DEFAULT_HANDLERS,
+		db _8XY4 - _8XYN_DEFAULT_HANDLERS, _8XY5 - _8XYN_DEFAULT_HANDLERS,
+		db _8XY6 - _8XYN_DEFAULT_HANDLERS, _8XY7 - _8XYN_DEFAULT_HANDLERS,
+		db _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS, _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS,
+		db _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS, _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS,
+		db _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS, _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS,
+		db _8XYE - _8XYN_DEFAULT_HANDLERS, _8XYN_Invalid - _8XYN_DEFAULT_HANDLERS,
 	ENDR
+_8XYN_JUMP_TABLE_ROM_END:
 
-DS ALIGN[8]
+_8XYN_DEFAULT_HANDLERS:
 
 _8XYN_Invalid:
 	rst InvalidInstr
@@ -1443,32 +1479,29 @@ _8XY0:
 	ld [hl], NN
 
 	DISPATCH()
-_8XY1:
+_8XY1: ; vf reset quirk on
 	LD_VX_SAVE_VY()
 	or NN
 	ld [hl], a
 
-	; vF reset quirk
 	xor a
 	ld [VF], a
 
 	DISPATCH()
-_8XY2:
+_8XY2: ; vf reset quirk on
 	LD_VX_SAVE_VY()
 	and NN
 	ld [hl], a
 
-	; vF reset quirk
 	xor a
 	ld [VF], a
 
 	DISPATCH()
-_8XY3:
+_8XY3: ; vf reset quirk on
 	LD_VX_SAVE_VY()
 	xor NN
 	ld [hl], a
 
-	; vF reset quirk
 	xor a
 	ld [VF], a
 
@@ -1499,8 +1532,7 @@ _8XY5:
 	SET_VF_BORROW()
 
 	DISPATCH()
-_8XY6:
-	; shifting quirk
+_8XY6: ; shifting quirk off
 	LD_VX_PTR_SAVE_VY()
 	srl NN
 	ld [hl], NN
@@ -1515,8 +1547,7 @@ _8XY7:
 	SET_VF_BORROW()
 
 	DISPATCH()
-_8XYE:
-	; shifting quirk
+_8XYE: ; shifting quirk off
 	LD_VX_PTR_SAVE_VY()
 	sla NN
 	ld [hl], NN
@@ -1524,7 +1555,53 @@ _8XYE:
 
 	DISPATCH()
 
-STATIC_ASSERT (_8XYE - _8XYN_Invalid) < 256, STRFMT("8XYN handlers exceed page! (%d bytes)", _8XYE - _8XYN_Invalid)
+_8XYN_DEFAULT_HANDLERS_END:
+
+DEF HANDLERS_END EQU _8XYE - _8XYN_DEFAULT_HANDLERS
+STATIC_ASSERT (HANDLERS_END < 256), STRFMT("8XYN handlers exceed page! (%d bytes)", HANDLERS_END)
+
+_8XYN_VF_RESET_OFF_HANDLERS:
+_8XY1_VF_RESET_OFF:
+	LD_VX_SAVE_VY()
+	or NN
+	ld [hl], a
+
+	DISPATCH()
+_8XY2_VF_RESET_OFF:
+	LD_VX_SAVE_VY()
+	and NN
+	ld [hl], a
+
+	DISPATCH()
+_8XY3_VF_RESET_OFF:
+	LD_VX_SAVE_VY()
+	xor NN
+	ld [hl], a
+
+	DISPATCH()
+_8XYN_VF_RESET_OFF_HANDLERS_END:
+
+_8XY6_SHIFTING_ON:
+	LD_VX_PTR()
+	srl [hl]
+	SET_VF_CARRY()
+
+	DISPATCH()
+_8XY6_SHIFTING_ON_END:
+
+_8XYE_SHIFTING_ON:
+	LD_VX_PTR()
+	sla [hl]
+	SET_VF_CARRY()
+
+	DISPATCH()
+_8XYE_SHIFTING_ON_END:
+
+SECTION "8XYNJumpTable", WRAM0, ALIGN[8]
+_8XYN_JUMP_TABLE:
+	ds 256
+_8XYN_HANDLERS:
+	ds _8XYN_DEFAULT_HANDLERS_END - _8XYN_DEFAULT_HANDLERS
 
 SECTION "Case9", ROM0, ALIGN[8]
 Case9:
@@ -1561,13 +1638,16 @@ OP_ANNN:
 
 	inc CHIP_PC
 	DISPATCH()
-	
-SECTION "CaseB", ROM0, ALIGN[8]
-CaseB:
-OP_BNNN: ; Quirk off, jump to V[0] + NNN
+
+; \1 = 0 jump quirk off (pc = V[0] + NNN), else on (pc = V[x] + NNN).
+MACRO BNNN
 	ld OP_HI, a
+	IF \1 == 0
+		ld hl, V0
+	ELSE
+		LD_VX_PTR()
+	ENDC
 	LD_OP_LOW()
-	ld hl, V0
 	add [hl]
 	ld CHIP_PC_LO, a
 	ld a, OP_HI
@@ -1579,6 +1659,15 @@ OP_BNNN: ; Quirk off, jump to V[0] + NNN
  	ld CHIP_PC_HI, a
 
 	DISPATCH()
+ENDM
+
+SECTION "BNNN_JumpingOff", ROM0, ALIGN[8]
+OP_BNNN_JUMPING_OFF:
+	BNNN(0)
+
+SECTION "CaseBJumpQuirk", ROM0, ALIGN[8]
+OP_BNNN_JUMPING_ON:
+	BNNN(1)
 
 SECTION "CaseC", ROM0, ALIGN[8]
 CaseC:
@@ -1633,7 +1722,7 @@ DXYN_HIRES_MASK_LOOKUP:
 		db (%10000000 >> (i & 7))
 	ENDR
 
-OP_DXYN:
+CaseD:
 	; \1 - 1 if running on GBC, 0 if not
 	; \2 - 1 if superchip hires, 0 if not 
 	; \3 - 0 if need to preserve hl, 1 if not
@@ -1954,20 +2043,18 @@ OP_DXYN:
 		DRAW_SPRITE \1, \2, 16
 	ENDM
 
-SECTION "DXYN_LOW_RES_DMG", ROM0, ALIGN[8]
-DXYN_LOW_RES_DMG:
+SECTION "DXYN_LORES_DMG", ROM0, ALIGN[8]
+OP_DXYN_LORES_DMG:
 	DXYN 0, 0
-
-SECTION "DXYN_HIGH_RES_DMG", ROM0, ALIGN[8]
-DXYN_HIGH_RES_DMG:
+SECTION "DXYN_HIRES_DMG", ROM0, ALIGN[8]
+OP_DXYN_HIRES_DMG:
 	DXYN 0, 1
 
-SECTION "DXYN_LOW_RES_GBC", ROM0, ALIGN[8]
-DXYN_LOW_RES_GBC:
+SECTION "DXYN_LORES_GBC", ROM0, ALIGN[8]
+OP_DXYN_LORES_GBC:
 	DXYN 1, 0
-
-SECTION "DXYN_HIGH_RES_GBC", ROM0, ALIGN[8]
-DXYN_HIGH_RES_GBC:
+SECTION "DXYN_HIRES_GBC", ROM0, ALIGN[8]
+OP_DXYN_HIRES_GBC:
 	DXYN 1, 1
 
 MACRO LD_KEY
@@ -2018,16 +2105,20 @@ CaseF:
 
 	bit 7, a
 	jr nz, .bit7Set
-	JP_TABLE(FXJumpTable)	
+	JP_TABLE(FX_JUMP_TABLE)	
 .invalid:
 	rst InvalidInstr
 .bit7Set:
 	cp $85
 	jr nz, .invalid
 
+SECTION "FXJumpTable", WRAM0, ALIGN[8]
+FX_JUMP_TABLE:
+	ds 256
+
 ; Matching on 7 low bits of the opcode, so 128 entries fit in a page.
-SECTION "FX Jump Table", ROM0, ALIGN[8]
-FXJumpTable:
+SECTION "FXJumpTableROM", ROM0
+FX_JUMP_TABLE_ROM:
 	ds 14, LOW(InvalidInstr), HIGH(InvalidInstr) ; $00-$06
     dw FX07 ; $07
     ds 04, LOW(InvalidInstr), HIGH(InvalidInstr) ; $08-$09
@@ -2045,12 +2136,13 @@ FXJumpTable:
 	ds 4, LOW(InvalidInstr), HIGH(InvalidInstr)  ; $31-$32
     dw FX33 ; $33
     ds 66, LOW(InvalidInstr), HIGH(InvalidInstr) ; $34-$54
-    dw FX55 ; $55
+    dw FX55_MEM_INCREMENT_ON ; $55
     ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $56-$64
-    dw FX65 ; $65
+    dw FX65_MEM_INCREMENT_ON ; $65
 	ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$74
 	dw FX75 ; $75
     ds 20, LOW(InvalidInstr), HIGH(InvalidInstr) ; $76-$7F
+FX_JUMP_TABLE_ROM_END:
 
 ; \1 = 0 - load from flags; else, store to flags.
 MACRO SCHIP_RPL_STORE 
@@ -2225,6 +2317,7 @@ FX33:
 	DISPATCH()
 
 ; \1 = 0 - load from ram, else, store to ram.
+; \2 = 0 - memory increment quirk off, else on.
 MACRO REG_STORE 
 	push CHIP_PC
 	ld a, OP_HI
@@ -2248,27 +2341,34 @@ MACRO REG_STORE
 	dec b
 	jr nz, .copyLoop\@
 
-	; memory increment quirk:
-	ld a, l
-	ldh [I_REG], a
-	ld a, h
-	cp HIGH(CHIP_RAM_END)
-	jr z, .overflow\@
-.storeHigh\@
-	ldh [I_REG + 1], a
 .end\@:
 	pop CHIP_PC
-	DISPATCH()
-.overflow\@:
-	ld a, HIGH(CHIP_RAM)
-	jr .storeHigh\@
+	IF \2 == 0
+		DISPATCH()
+	ELSE
+		ld a, l
+		ldh [I_REG], a
+		ld a, h
+		cp HIGH(CHIP_RAM_END)
+		jr z, .overflow\@
+	.storeHigh\@
+		ldh [I_REG + 1], a
+		DISPATCH()
+	.overflow\@:
+		ld a, HIGH(CHIP_RAM)
+		jr .storeHigh\@
+	ENDC
 ENDM
 
-FX55: 
-	REG_STORE(1)
+FX55_MEM_INCREMENT_OFF: 
+	REG_STORE 1, 0
+FX55_MEM_INCREMENT_ON: 
+	REG_STORE 1, 1
 
-FX65: 
-	REG_STORE(0)
+FX65_MEM_INCREMENT_OFF: 
+	REG_STORE 0, 0
+FX65_MEM_INCREMENT_ON:
+	REG_STORE 0, 1
 
 SECTION "VRAMTiles", VRAM[$8000 + SCREEN_BUF_SIZE]
 VRAM_TILES:

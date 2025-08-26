@@ -146,10 +146,12 @@ MACRO RAND
 ENDM
 
 ; \1 - table address, 256 byte aligned. index is passed in 'a'
-MACRO JP_TABLE ; 
+MACRO JP_TABLE
 	add a
-	ld h, HIGH(\1)
 	ld l, a
+	adc HIGH(\1)
+	sub l
+	ld h, a
 
 	ld a, [hl+]
 	ld h, [hl]

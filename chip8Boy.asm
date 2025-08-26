@@ -889,7 +889,7 @@ SECTION "Case0", ROM0, ALIGN[8]
 Case0:
 	LD_OP_LOW()
 	cp $EE
-	jr nz, .after
+	jr nz, .OP_00E0
 
 .OP_00EE:
 	; underflow check and sp update
@@ -908,10 +908,15 @@ Case0:
 	ld b, b
 	jr @
 
-.after:
+.OP_00E0:
 	inc CHIP_PC
 	cp $E0
-	jr z, OP_00E0
+	jr nz, .after
+
+	call ClearChipScreen
+	DISPATCH()
+
+.after:
 	ld NN, a
 	sub $FB
 	jr z, OP_00FB
@@ -933,10 +938,6 @@ Case0:
 	jp z, OP_00BN
 	
 	rst InvalidInstr
-
-OP_00E0:
-	call ClearChipScreen
-	DISPATCH()
 
 ; \1 = 0 - left, otherwise right; \2 - 1 if running on GBC, 0 if not.
 MACRO SCROLL_HORIZONTAL 
@@ -1650,10 +1651,8 @@ MACRO BNNN
 	LD_OP_LOW()
 	add [hl]
 	ld CHIP_PC_LO, a
-	ld a, OP_HI
-	jr nc, .noCarry
-	inc a
-.noCarry:
+	adc OP_HI
+	sub CHIP_PC_LO
 	and $F
 	add HIGH(CHIP_RAM)
  	ld CHIP_PC_HI, a
@@ -2102,21 +2101,13 @@ CaseF:
 	ld OP_HI, a
 	LD_OP_LOW()
 	inc CHIP_PC
-
-	bit 7, a
-	jr nz, .bit7Set
 	JP_TABLE(FX_JUMP_TABLE)	
-.invalid:
-	rst InvalidInstr
-.bit7Set:
-	cp $85
-	jr nz, .invalid
 
 SECTION "FXJumpTable", WRAM0, ALIGN[8]
 FX_JUMP_TABLE:
-	ds 256
+	ds 512
 
-; Matching on 7 low bits of the opcode, so 128 entries fit in a page.
+; 256 entries, 512 bytes
 SECTION "FXJumpTableROM", ROM0
 FX_JUMP_TABLE_ROM:
 	ds 14, LOW(InvalidInstr), HIGH(InvalidInstr) ; $00-$06
@@ -2141,40 +2132,10 @@ FX_JUMP_TABLE_ROM:
     dw FX65_MEM_INCREMENT_ON ; $65
 	ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $66-$74
 	dw FX75 ; $75
-    ds 20, LOW(InvalidInstr), HIGH(InvalidInstr) ; $76-$7F
+    ds 30, LOW(InvalidInstr), HIGH(InvalidInstr) ; $76-$84
+	dw FX85 ; $85
+	ds 244, LOW(InvalidInstr), HIGH(InvalidInstr) ; $86-$FF
 FX_JUMP_TABLE_ROM_END:
-
-; \1 = 0 - load from flags; else, store to flags.
-MACRO SCHIP_RPL_STORE 
-	ld a, OP_HI
-	LD_VX()
-	and $7
-	ld b, a
-	inc b ; v[x] is included
-
-	ld hl, V0
-	ld c, LOW(SCHIP_RPL_FLAGS)
-.copyLoop\@
-	IF \1 == 0
-		ldh a, [c]
-		ld [hl+], a
-	ELSE
-		ld a, [hl+]
-		ldh [c], a
-	ENDC
-
-	inc c
-	dec b
-	jr nz, .copyLoop\@
-
-	DISPATCH()
-ENDM
-
-FX85:
-	SCHIP_RPL_STORE(0)
-
-FX75:
-	SCHIP_RPL_STORE(1)
 
 FX07:
 	ld a, OP_HI
@@ -2369,6 +2330,37 @@ FX65_MEM_INCREMENT_OFF:
 	REG_STORE 0, 0
 FX65_MEM_INCREMENT_ON:
 	REG_STORE 0, 1
+
+; \1 = 0 - load from flags; else, store to flags.
+MACRO SCHIP_RPL_STORE 
+	ld a, OP_HI
+	LD_VX()
+	and $7
+	ld b, a
+	inc b ; v[x] is included
+
+	ld hl, V0
+	ld c, LOW(SCHIP_RPL_FLAGS)
+.copyLoop\@
+	IF \1 == 0
+		ldh a, [c]
+		ld [hl+], a
+	ELSE
+		ld a, [hl+]
+		ldh [c], a
+	ENDC
+
+	inc c
+	dec b
+	jr nz, .copyLoop\@
+
+	DISPATCH()
+ENDM
+
+FX75:
+	SCHIP_RPL_STORE(1)
+FX85:
+	SCHIP_RPL_STORE(0)
 
 SECTION "VRAMTiles", VRAM[$8000 + SCREEN_BUF_SIZE]
 VRAM_TILES:

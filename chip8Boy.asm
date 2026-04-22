@@ -97,8 +97,6 @@ IPF_BLOCKS_NUM:
 	ds 1
 IPF_DISPLAY:
 	ds 2
-; INSTR_COUNTER:
-; 	ds 1 
 INSTR_BLOCK_COUNTER:
 	ds 1
 QUIRKS:
@@ -725,7 +723,6 @@ InitChip8:
 
 	; setting IPF variables
 	ldh a, [IPF_PER_BLOCK]
-	;ldh [INSTR_COUNTER], a
 	ld b, a
 	ldh a, [IPF_BLOCKS_NUM]
 	ldh [INSTR_BLOCK_COUNTER], a
@@ -815,7 +812,7 @@ SECTION "InstrBlockEndHandler", ROM0[$0020]
 InstrBlockEnd:
 	pop af ; discard return address
 	ldh a, [IPF_PER_BLOCK]
-	ld INSTR_COUNTER_REG, a; ld [hl], a ; reload number of instructions per block
+	ld INSTR_COUNTER_REG, a; reload number of instructions per block
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
 	jp nz, InstrLoop

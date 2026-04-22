@@ -130,7 +130,7 @@ RNG_STATE:
 	ds 4
 
 ; Taken from: https://gbdev.io/gb-asm-tutorial/cheatsheet.html#generate-random-numbers
-; RNG_STATE -> ac
+; RNG_STATE -> ab
 MACRO RAND
 	ld hl, RNG_STATE
   	ld a, [hl]
@@ -140,7 +140,7 @@ MACRO RAND
   	ld [hl+], a
   	adc [hl]
   	ld [hl+], a
-  	ld c, a
+  	ld b, a
   	adc [hl]
   	ld [hl], a
 ENDM

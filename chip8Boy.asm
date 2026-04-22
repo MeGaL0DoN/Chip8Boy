@@ -2,23 +2,19 @@ INCLUDE "hardware.inc"
 INCLUDE "utils.asm"
 INCLUDE "config.asm"
 
+; To assemble run:
 ; rgbasm -o chip8boy.o chip8boy.asm ; rgblink -t -o chip8boy.gbc chip8boy.o ; rgbfix -c -v -p 0xFF chip8boy.gbc
 
 DEF CHIP_PC EQUS "de"
 DEF CHIP_PC_HI EQUS "d"
 DEF CHIP_PC_LO EQUS "e"
 
-DEF OP_HI EQUS "b"
-DEF NN EQUS "c"
+DEF OP_HI EQUS "c"
+DEF NN EQUS "b"
+DEF INSTR_COUNTER_REG EQUS "b"
 
 MACRO LD_OP_LOW
 	ld a, [CHIP_PC]
-ENDM
-MACRO LD_PC_HI_OP_HI
-	ld a, OP_HI
-	and $F
-	add HIGH(CHIP_RAM)
-	ld CHIP_PC_HI, a
 ENDM
 MACRO SKIP_NEXT_INSTR
 	inc CHIP_PC
@@ -26,40 +22,17 @@ MACRO SKIP_NEXT_INSTR
 ENDM
 
 MACRO LD_X
+	ld a, OP_HI
 	and $F
 ENDM
-MACRO LD_Y
-	ld a, NN
-	and $F0
-	swap a
-ENDM
-MACRO LD_N
-	ld a, NN
-	and $F
-ENDM
-
+; expect high opcode byte to be in a
 MACRO LD_VX_PTR
-	LD_X()
+	and $F
 	ld h, HIGH(V0)
 	ld l, a
 ENDM
 MACRO LD_VX
 	LD_VX_PTR()
-	ld a, [hl]
-ENDM
-
-; Y index is already in a
-MACRO LD_VX_PTR_SAVE_VY
-	ld h, HIGH(V0)	
-	ld l, a
-	ld NN, [hl]
-
-	ld a, OP_HI
-	LD_X()
-	ld l, a
-ENDM
-MACRO LD_VX_SAVE_VY
-	LD_VX_PTR_SAVE_VY()
 	ld a, [hl]
 ENDM
 
@@ -124,8 +97,8 @@ IPF_BLOCKS_NUM:
 	ds 1
 IPF_DISPLAY:
 	ds 2
-INSTR_COUNTER:
-	ds 1 
+; INSTR_COUNTER:
+; 	ds 1 
 INSTR_BLOCK_COUNTER:
 	ds 1
 QUIRKS:
@@ -256,6 +229,7 @@ MACRO CLEAR_SCREEN
 		ld hl, SCREEN_BUF
 		xor a
 	ENDC
+	push bc
 	ld c, 8
 
 .clearBlock\@:
@@ -283,6 +257,7 @@ MACRO CLEAR_SCREEN
 		inc a ; will become 1
 		ldh [DRAW_FLAG], a
 	ENDC
+	pop bc
 	ret
 ENDM
 
@@ -750,7 +725,7 @@ InitChip8:
 
 	; setting IPF variables
 	ldh a, [IPF_PER_BLOCK]
-	ldh [INSTR_COUNTER], a
+	;ldh [INSTR_COUNTER], a
 	ld b, a
 	ldh a, [IPF_BLOCKS_NUM]
 	ldh [INSTR_BLOCK_COUNTER], a
@@ -783,6 +758,10 @@ InitChip8:
 	; reset PC
 	ld CHIP_PC, CHIP_RAM + $200
 
+	; load block instruction count
+	ldh a, [IPF_PER_BLOCK]
+	ld INSTR_COUNTER_REG, a
+
 	; turning LCD back on.
 	ld a, LCDC_ON | LCDC_BG | LCDC_BLOCK01
 	ldh [rLCDC], a
@@ -809,24 +788,23 @@ InstrLoop:
 	EXEC()
 
 FrameEnd:
-	ld b, 1
+	ld c, 1
 	ldh a, [DELAY_TIMER]
-	sub b
+	sub c
 	adc 0 ; bring back to 0, if decremented to $FF
 	ldh [DELAY_TIMER], a
 	ldh a, [SOUND_TIMER]
-	sub b
+	sub c
 	adc 0
 	ldh [SOUND_TIMER], a
-	ld a, b
+	ld a, c
 	ldh [FRAME_DONE_FLAG], a
 	SAFE_HALT() ; wait for VBlank
 
 	jr InstrLoop
 
 MACRO DISPATCH
-	ld hl, INSTR_COUNTER 
-	dec [hl]
+	dec INSTR_COUNTER_REG
 	jr z, .instrBlockEnd\@
 	EXEC()
 .instrBlockEnd\@:
@@ -837,7 +815,7 @@ SECTION "InstrBlockEndHandler", ROM0[$0020]
 InstrBlockEnd:
 	pop af ; discard return address
 	ldh a, [IPF_PER_BLOCK]
-	ld [hl], a ; reload number of instructions per block
+	ld INSTR_COUNTER_REG, a; ld [hl], a ; reload number of instructions per block
 	ld hl, INSTR_BLOCK_COUNTER
 	dec [hl]
 	jp nz, InstrLoop
@@ -917,7 +895,7 @@ Case0:
 	DISPATCH()
 
 .after:
-	ld NN, a
+	ld OP_HI, a
 	sub $FB
 	jr z, OP_00FB
 	dec a ; $FC
@@ -928,7 +906,7 @@ Case0:
 	jp z, OP_00FE
 	dec a ; $FF
 	jp z, OP_00FF
-	ld a, NN
+	ld a, OP_HI
 	and $F0
 	cp $C0
 	jp z, OP_00CN
@@ -936,7 +914,7 @@ Case0:
 	jp z, OP_00DN
 	cp $B0
 	jp z, OP_00BN
-	
+
 	rst InvalidInstr
 
 ; \1 = 0 - left, otherwise right; \2 - 1 if running on GBC, 0 if not.
@@ -1046,6 +1024,8 @@ MACRO SCROLL_HORIZONTAL
 	jp FrameEnd
 
 .highResMode\@:
+	push bc
+.highResModeLoop\@:
 	REPT 8
 		IF \2 == 0
 			WAIT_VRAM_ACCESS()
@@ -1083,7 +1063,7 @@ MACRO SCROLL_HORIZONTAL
 	ENDR
 
 	dec c
-	jp nz, .highResMode\@
+	jp nz, .highResModeLoop\@
 
 	; scroll and clear half of right/left column
 	IF \1 == 0
@@ -1117,6 +1097,7 @@ MACRO SCROLL_HORIZONTAL
 	dec c
 	jr nz, .clearHalfTile\@
 
+	pop bc
 	pop CHIP_PC
 	jp FrameEnd
 ENDM
@@ -1137,10 +1118,12 @@ OP_00FC: ; scroll left 4 pixels
 .gbc:
 	SCROLL_HORIZONTAL 0, 1
 
-; \1 = 0 - down, otherwise up; \2 - 1 if running on GBC, 0 if not.
+; low opcode byte stored in OP_HI (c); \1 = 0 - down, otherwise up; \2 - 1 if running on GBC, 0 if not.
 MACRO SCROLL_VERTICAL
-	LD_N()
+	ld a, OP_HI
+	and $F 
 	jp z, .scroll0\@
+	push bc
 	ld b, a
 	; scroll twice as much in modern schip lores mode
 	ldh a, [HIGH_RES_MODE_FLAG]
@@ -1276,6 +1259,7 @@ MACRO SCROLL_VERTICAL
 	ENDR
 
 	pop CHIP_PC
+	pop bc
 	; early instruction loop break, because scroll takes big part of the frame.
 	jp FrameEnd
 
@@ -1342,11 +1326,13 @@ OP_00FE:
 OP_00FF:
 	CHANGE_RES_MODE(1)
 
+; \1 -- first nibble of the opcode combined with 0 (e.g. for $1NNN = $10)
 MACRO JMP
+	add (HIGH(CHIP_RAM) - \1)
 	ld OP_HI, a
 	LD_OP_LOW()
+	ld CHIP_PC_HI, OP_HI
 	ld CHIP_PC_LO, a
-	LD_PC_HI_OP_HI()
 
 	DISPATCH()
 ENDM
@@ -1354,7 +1340,7 @@ ENDM
 SECTION "Case1", ROM0, ALIGN[8]
 Case1: 
 OP_1NNN:
-	JMP()
+	JMP($10)
 
 SECTION "Case2", ROM0, ALIGN[8]
 Case2:
@@ -1367,7 +1353,7 @@ OP_2NNN:
 	; storing current pc to the stack
 	push CHIP_PC
 	; setting pc to the new value
-	JMP()
+	JMP($20)
 
 .overflow:
 	ld b, b
@@ -1400,15 +1386,15 @@ OP_4XNN:
 SECTION "Case5", ROM0, ALIGN[8]
 Case5:
 OP_5XY0:
-	ld OP_HI, a
+	LD_VX_PTR()
+	ld OP_HI, [hl]
 	LD_OP_LOW()
-	ld NN, a
+	ld l, a
 	and $F
 	jr nz, .invalid
-
-	LD_Y()
-	LD_VX_SAVE_VY()
-	cp NN
+	swap l
+	ld a, OP_HI
+	cp [hl]
 	jr nz, .end
 	SKIP_NEXT_INSTR()
 .end:
@@ -1448,11 +1434,7 @@ Case8:
 	ld h, HIGH(_8XYN_JUMP_TABLE)
 	ld l, a
 	ld l, [hl]
-	inc h
-	; load Y
-	and $F0
-	swap a
-	
+	inc h	
 	jp hl
 
 ; short jump table (entries are 1 byte low address bytes for handlers in the next page)
@@ -1475,14 +1457,34 @@ _8XYN_DEFAULT_HANDLERS:
 _8XYN_Invalid:
 	rst InvalidInstr
 
+; a already contains low opcode byte; expects high nibble of OP_HI to be $8
+; low Y nibble cleaning: \1 = 0 -- don't do anything, \1 = 1 -- dec, everything else -- and $F0
+MACRO LD_VX_PTR_SAVE_VY
+	; load Y
+	IF \1 == 0
+		; low nibble is already 0
+	ELIF \1 == 1
+		dec a
+	ELSE
+		and $F0
+	ENDC
+	swap a
+	ld h, HIGH(V0)	
+	ld l, a
+	ld a, [hl]
+	; setting low byte to x
+	ld l, OP_HI
+	res 7, l
+ENDM
+
 _8XY0:
-	LD_VX_PTR_SAVE_VY()
-	ld [hl], NN
+	LD_VX_PTR_SAVE_VY(0)
+	ld [hl], a
 
 	DISPATCH()
 _8XY1: ; vf reset quirk on
-	LD_VX_SAVE_VY()
-	or NN
+	LD_VX_PTR_SAVE_VY(1)
+	or [hl]
 	ld [hl], a
 
 	xor a
@@ -1490,8 +1492,8 @@ _8XY1: ; vf reset quirk on
 
 	DISPATCH()
 _8XY2: ; vf reset quirk on
-	LD_VX_SAVE_VY()
-	and NN
+	LD_VX_PTR_SAVE_VY(2)
+	and [hl]
 	ld [hl], a
 
 	xor a
@@ -1499,8 +1501,8 @@ _8XY2: ; vf reset quirk on
 
 	DISPATCH()
 _8XY3: ; vf reset quirk on
-	LD_VX_SAVE_VY()
-	xor NN
+	LD_VX_PTR_SAVE_VY(3)
+	xor [hl]
 	ld [hl], a
 
 	xor a
@@ -1520,38 +1522,39 @@ MACRO SET_VF_BORROW
 ENDM
 
 _8XY4:
-	LD_VX_SAVE_VY()
-	add NN
+	LD_VX_PTR_SAVE_VY(4)
+	add [hl]
 	ld [hl], a
 	SET_VF_CARRY()
 
 	DISPATCH()
 _8XY5:
-	LD_VX_SAVE_VY()
-	sub NN
+	LD_VX_PTR_SAVE_VY(5)
+	ld OP_HI, a
+	ld a, [hl]
+	sub OP_HI
 	ld [hl], a
 	SET_VF_BORROW()
 
 	DISPATCH()
 _8XY6: ; shifting quirk off
-	LD_VX_PTR_SAVE_VY()
-	srl NN
-	ld [hl], NN
+	LD_VX_PTR_SAVE_VY(6)
+	rra ; CARRY SHOULD BE CLEAR AFTER 'SWAP A' IN Case8!
+	ld [hl], a
 	SET_VF_CARRY()
 
 	DISPATCH()
 _8XY7:
-	LD_VX_PTR_SAVE_VY()
-	ld a, NN
+	LD_VX_PTR_SAVE_VY(7)
 	sub [hl]
 	ld [hl], a
 	SET_VF_BORROW()
 
 	DISPATCH()
 _8XYE: ; shifting quirk off
-	LD_VX_PTR_SAVE_VY()
-	sla NN
-	ld [hl], NN
+	LD_VX_PTR_SAVE_VY($E)
+	add a
+	ld [hl], a
 	SET_VF_CARRY()
 
 	DISPATCH()
@@ -1563,27 +1566,29 @@ STATIC_ASSERT (HANDLERS_END < 256), STRFMT("8XYN handlers exceed page! (%d bytes
 
 _8XYN_VF_RESET_OFF_HANDLERS:
 _8XY1_VF_RESET_OFF:
-	LD_VX_SAVE_VY()
-	or NN
+	LD_VX_PTR_SAVE_VY(1)
+	or [hl]
 	ld [hl], a
 
 	DISPATCH()
 _8XY2_VF_RESET_OFF:
-	LD_VX_SAVE_VY()
-	and NN
+	LD_VX_PTR_SAVE_VY(2)
+	and [hl]
 	ld [hl], a
 
 	DISPATCH()
 _8XY3_VF_RESET_OFF:
-	LD_VX_SAVE_VY()
-	xor NN
+	LD_VX_PTR_SAVE_VY(3)
+	xor [hl]
 	ld [hl], a
 
 	DISPATCH()
 _8XYN_VF_RESET_OFF_HANDLERS_END:
 
 _8XY6_SHIFTING_ON:
-	LD_VX_PTR()
+	ld h, HIGH(V0)
+	ld l, OP_HI
+	res 7, l
 	srl [hl]
 	SET_VF_CARRY()
 
@@ -1591,7 +1596,9 @@ _8XY6_SHIFTING_ON:
 _8XY6_SHIFTING_ON_END:
 
 _8XYE_SHIFTING_ON:
-	LD_VX_PTR()
+	ld h, HIGH(V0)
+	ld l, OP_HI
+	res 7, l
 	sla [hl]
 	SET_VF_CARRY()
 
@@ -1607,15 +1614,15 @@ _8XYN_HANDLERS:
 SECTION "Case9", ROM0, ALIGN[8]
 Case9:
 OP_9XY0: 
-	ld OP_HI, a
+	LD_VX_PTR()
+	ld OP_HI, [hl]
 	LD_OP_LOW()
-	ld NN, a
+	ld l, a
 	and $F
 	jr nz, .invalid
-
-	LD_Y()
-	LD_VX_SAVE_VY()
-	cp NN
+	swap l
+	ld a, OP_HI
+	cp [hl]
 	jr z, .end
 	SKIP_NEXT_INSTR()
 .end:
@@ -1629,8 +1636,7 @@ SECTION "CaseA", ROM0, ALIGN[8]
 CaseA: 
 OP_ANNN:
 	; set high byte
-	and $F
-	add HIGH(CHIP_RAM)
+	add (HIGH(CHIP_RAM) - $A0)
 	ldh [I_REG + 1], a
 
 	; set low byte
@@ -1671,16 +1677,18 @@ OP_BNNN_JUMPING_ON:
 SECTION "CaseC", ROM0, ALIGN[8]
 CaseC:
 OP_CXNN: ; V[x] = rand() & NN
+	push bc
 	ld OP_HI, a
 	RAND()
-	xor c
-	ld c, a
+	xor b
+	ld b, a
 	ld a, OP_HI
 	LD_VX_PTR()
 	LD_OP_LOW()
-	and c
+	and b
 	ld [hl], a
 
+	pop bc
 	inc CHIP_PC
 	DISPATCH()
 
@@ -1767,6 +1775,7 @@ CaseD:
 
 	; \1 - 1 if running on GBC, 0 if not
 	MACRO DXYN_FINISH
+		pop bc
 		pop CHIP_PC
 		; on DMG correct VF to be either 0 or 1 if collision occured, not other value.
 		IF \1 == 0 
@@ -1942,7 +1951,9 @@ CaseD:
 	; \2 - 1 if superchip hires, 0 if not; 
 	; \3 - 1 if height == 1, 0 if not
 	MACRO DXYN_LOAD_VALS
-		LD_Y()
+		ld a, NN
+		and $F0
+		swap a
 		ld h, HIGH(V0)
 		ld l, a
 		ld a, [hl]
@@ -1957,7 +1968,6 @@ CaseD:
 		ENDC
 		ld NN, a
 
-		ld a, OP_HI
 		LD_X()
 		ld l, a
 		ld a, [hl]
@@ -2017,6 +2027,7 @@ CaseD:
 		LD_OP_LOW()
 		inc CHIP_PC
 		push CHIP_PC
+		push bc
 		ld NN, a
 		and $F
 		dec a ; check if N == 1 
@@ -2149,7 +2160,6 @@ FX0A:
 	ldh a, [FX0A_KEY_REG]
 	cp FX0A_NOT_ACTIVE_FLAG
 	jr nz, .skipFX0AInit
-	ld a, OP_HI
 	LD_X()
 	ldh [FX0A_KEY_REG], a
 .skipFX0AInit:
@@ -2205,11 +2215,11 @@ FX29:
 	ld a, OP_HI
 	LD_VX()
 	and $F
-	ld b, a
+	ld OP_HI, a
 	; multiply by 5
 	add a
 	add a
-	add b
+	add OP_HI
 
 	ldh [I_REG], a
 	ld a, HIGH(CHIP_RAM)
@@ -2221,11 +2231,11 @@ FX30:
 	ld a, OP_HI
 	LD_VX()
 	and $F
-	ld b, a
+	ld OP_HI, a
 	; multiply by 10
 	add a
 	add a
-	add b
+	add OP_HI
 	add a
 	; schip font is stored after chip8 font, so add offset
 	add (CHIP8_FONT_END - CHIP8_FONT)
@@ -2246,6 +2256,7 @@ FX33:
 	ld h, [hl]
 	ld l, c
 
+	push bc
 	ld bc, (100 << 8) | $FF ; b = 100, c = -1
 
 .countHundreds:
@@ -2275,6 +2286,7 @@ FX33:
 
 	ld [hl], b ; storing ones	
 .end:
+	pop bc
 	DISPATCH()
 
 ; \1 = 0 - load from ram, else, store to ram.
@@ -2283,8 +2295,8 @@ MACRO REG_STORE
 	push CHIP_PC
 	ld a, OP_HI
 	LD_X()
-	ld b, a 
-	inc b ; V[x] is included
+	ld OP_HI, a 
+	inc OP_HI ; V[x] is included
 
 	LD_I_REG h, l
 	ld de, V0
@@ -2299,7 +2311,7 @@ MACRO REG_STORE
 	ENDC
 
 	inc e
-	dec b
+	dec OP_HI
 	jr nz, .copyLoop\@
 
 .end\@:
@@ -2336,8 +2348,8 @@ MACRO SCHIP_RPL_STORE
 	ld a, OP_HI
 	LD_VX()
 	and $7
-	ld b, a
-	inc b ; v[x] is included
+	ld OP_HI, a
+	inc OP_HI ; v[x] is included
 
 	ld hl, V0
 	ld c, LOW(SCHIP_RPL_FLAGS)
@@ -2351,7 +2363,7 @@ MACRO SCHIP_RPL_STORE
 	ENDC
 
 	inc c
-	dec b
+	dec OP_HI
 	jr nz, .copyLoop\@
 
 	DISPATCH()

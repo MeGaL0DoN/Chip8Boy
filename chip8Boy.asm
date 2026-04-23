@@ -1770,10 +1770,12 @@ CaseD:
 		ENDC
 	ENDM
 
-	; \1 - 1 if running on GBC, 0 if not
+	; \1 - 1 if running on GBC, 0 if not; \2 - 1 if should pop CHIP_PC, 0 if not.
 	MACRO DXYN_FINISH
+		IF \2 != 0
+			pop CHIP_PC
+		ENDC
 		pop bc
-		pop CHIP_PC
 		; on DMG correct VF to be either 0 or 1 if collision occured, not other value.
 		IF \1 == 0 
 			ldh a, [temp4]
@@ -1812,7 +1814,7 @@ CaseD:
 		ldh [temp1], a
 		jp nz, \1
 	.yClip\@:
-		DXYN_FINISH(\2)
+		DXYN_FINISH \2, 1
 	ENDM
 
 	; \1 - 1 if superchip hires, 0 if not
@@ -1842,14 +1844,21 @@ CaseD:
 		ENDC
 
 		DXYN_LD_MASK_HIGH_PTR(\2)
-		ld c, d
 
 		IF \3 != 16
 			cp $80
 			jr nz, .regularDraw\@
+
+			IF \3 == 1
+				ldh a, [temp1]
+				ld c, a
+			ELSE
+				ld c, d
+			ENDC
+
 			DXYN_PROCESS_PIXEL \1, \2, \3 == 1 ; single-pixel draw
 			IF \3 == 1
-				DXYN_FINISH(\1)
+				DXYN_FINISH \1, 0
 			ELSE
 				DXYN_CHECK_LOOP .heightLoop\@, \1, \2
 			ENDC		
@@ -1859,9 +1868,17 @@ CaseD:
 	REDEF spriteByteEnd EQUS ".spriteByteEnd\@"
 
 	.regularDraw\@:
+		IF \3 == 1
+			push CHIP_PC
+		ENDC
 		IF \3 != 16 ; otherwise, it was already saved to e
 			ld e, a
 		ENDC
+		IF \3 == 1
+			ldh a, [temp1]
+			ld d, a
+		ENDC
+		ld c, d
 		push hl
     	FOR i, 7, -1, -1
 			IF i != 7
@@ -1938,7 +1955,7 @@ CaseD:
  	{xClip}:
 		pop hl
     	IF \3 == 1
-		    DXYN_FINISH(\1)
+		    DXYN_FINISH \1, 1
     	ELSE
 		    DXYN_CHECK_LOOP .heightLoop\@, \1, \2
     	ENDC
@@ -1963,6 +1980,11 @@ CaseD:
 		IF \3 == 0
 			ldh [temp2], a
 		ENDC
+		; saving y * 2 in hires, y * 4 in lores
+		add a
+		IF \2 == 0
+			add a
+		ENDC
 		ld NN, a
 
 		LD_X()
@@ -1985,20 +2007,18 @@ CaseD:
 				ld h, HIGH(DXYN_GBC_HIRES_BASE_ADDR_LOOKUP)
 			ENDC
 		ENDC
-		ld d, a
+		IF \3 == 1
+			ldh [temp1], a
+		ELSE
+			ld d, a
+		ENDC
 		
 		; fetching base framebuf address:
 		add a ; x * 2 (each entry is 2 bytes)
 		ld l, a
 		ld a, [hl+]
 		ld h, [hl]
-		; adding y * 2 to the address in hires, y * 4 in lores
-		add NN
-		add NN
-		IF \2 == 0
-			add NN
-			add NN
-		ENDC
+		add NN ; adding saved y offset
 		ld l, a
 
 		; clearing VF (both VX and VY are fetched now)
@@ -2023,7 +2043,6 @@ CaseD:
 		ld OP_HI, a
 		LD_OP_LOW()
 		inc CHIP_PC
-		push CHIP_PC
 		push bc
 		ld NN, a
 		and $F
@@ -2032,6 +2051,7 @@ CaseD:
 		DXYN_LOAD_VALS \1, \2, 1
 		DRAW_SPRITE \1, \2, 1 ; 8x1 (single row) draw
 	.regularDraw\@:
+		push CHIP_PC
 		inc a
 		jp z, .draw16x16\@
 		ldh [temp1], a ; saving height in temp1
